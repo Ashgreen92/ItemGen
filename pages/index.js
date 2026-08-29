@@ -214,82 +214,42 @@ function ListedToggles({ item, onToggle }) {
     </div>
   );
 }
-function StockCard({ item: e, onOpen }) {
-  const [photoIndex, setPhotoIndex] = useState(0);
-  const photos = e.photos?.length ? e.photos : e.thumbnail ? [e.thumbnail] : [];
+function StockListRow({ item: e, onOpen }) {
   const isListed = e.ebay_listed || e.vinted_listed || e.depop_listed;
-
-  const nextPhoto = (evt) => {
-    evt.stopPropagation();
-    setPhotoIndex((i) => (i + 1) % photos.length);
-  };
-  const prevPhoto = (evt) => {
-    evt.stopPropagation();
-    setPhotoIndex((i) => (i - 1 + photos.length) % photos.length);
-  };
+  const thumb = e.photos?.[0] || e.thumbnail;
 
   return (
-    <div
+    <button
       onClick={() => onOpen(e)}
-      className={`text-left rounded overflow-hidden active:scale-[0.99] transition border cursor-pointer ${
-        isListed ? "bg-[#3F5E42]/10 border-[#3F5E42]/50" : "bg-[#F7F3E8] border-[#C9BFA3]"
+      className={`w-full flex items-center gap-3 text-left rounded-sm border p-2 transition active:scale-[0.99] ${
+        isListed ? "bg-[#3F5E42]/8 border-[#3F5E42]/40" : "bg-[#F7F3E8] border-[#C9BFA3]"
       }`}
     >
-      <div className="aspect-square bg-[#DCD4BC] relative overflow-hidden">
-        {photos[photoIndex] && <img src={photos[photoIndex]} alt="" className="w-full h-full object-cover" />}
-
-        {photos.length > 1 && (
-          <>
-            <button
-              onClick={prevPhoto}
-              className="absolute left-1 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center text-sm"
-            >
-              ‹
-            </button>
-            <button
-              onClick={nextPhoto}
-              className="absolute right-1 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center text-sm"
-            >
-              ›
-            </button>
-            <div className="absolute bottom-1.5 left-0 right-0 flex justify-center gap-1">
-              {photos.map((_, i) => (
-                <span
-                  key={i}
-                  className={`w-1.5 h-1.5 rounded-full ${i === photoIndex ? "bg-white" : "bg-white/40"}`}
-                />
-              ))}
-            </div>
-          </>
-        )}
-
+      <div className="w-14 h-14 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0 relative">
+        {thumb && <img src={thumb} alt="" className="w-full h-full object-cover" />}
         {e.status === "sold" && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <span
-              className="text-[#A63A2E] border-4 border-[#A63A2E] px-3 py-1 -rotate-12 font-mono font-bold text-lg tracking-[0.2em] uppercase opacity-80"
-              style={{ mixBlendMode: "multiply" }}
-            >
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ mixBlendMode: "multiply" }}>
+            <span className="text-[#A63A2E] border-2 border-[#A63A2E] px-1 -rotate-12 font-mono font-bold text-[9px] tracking-widest uppercase opacity-90">
               Sold
             </span>
           </div>
         )}
       </div>
-      <div className="p-2.5">
-        <div className="font-medium text-sm truncate mb-1">{e.title}</div>
-        <div className="flex items-center gap-1.5 flex-wrap mb-1.5">
+
+      <div className="flex-1 min-w-0">
+        <div className="font-medium text-sm truncate">{e.title}</div>
+        <div className="flex items-center gap-2 flex-wrap mt-1">
           <StatusBadge status={e.status} />
           {e.status === "sold" && e.sale_price != null ? (
             <span className="text-[#3F5E42] font-mono font-semibold text-sm">£{e.sale_price}</span>
           ) : (
             e.status === "ready" && <PriceTag low={e.price_low} high={e.price_high} />
           )}
-        </div>
-        <div className="flex items-center justify-between gap-1">
-          <span className="text-xs font-mono text-[#8A7F63] truncate">
+          <span className="text-xs font-mono text-[#8A7F63]">
             #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
           </span>
           {isListed && (
-            <div className="flex gap-0.5 shrink-0">
+            <div className="flex gap-0.5">
               {e.ebay_listed && (
                 <span className="w-4 h-4 rounded-sm bg-[#3F5E42]/15 text-[#3F5E42] text-[8px] font-bold flex items-center justify-center" title="eBay">EB</span>
               )}
@@ -303,7 +263,7 @@ function StockCard({ item: e, onOpen }) {
           )}
         </div>
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -827,10 +787,12 @@ export default function Home() {
             const revenue = soldItems.reduce((s, e) => s + (Number(e.sale_price) || 0), 0);
             const cost = soldItems.reduce((s, e) => s + (Number(e.cost_price) || 0), 0);
             const needsAttention = items.filter((e) => e.status === "needs_size" || e.status === "error");
+            const recent = [...items].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 6);
 
             return (
               <>
-                <p className="font-serif text-2xl mb-6">Dashboard</p>
+                <p className="font-serif text-2xl mb-1">Dashboard</p>
+                <p className="text-sm text-[#8A7F63] mb-6">A running total of everything moving through the ledger.</p>
 
                 <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-8">
                   {[
@@ -840,8 +802,15 @@ export default function Home() {
                     { label: "Cost", value: `£${cost.toFixed(2)}` },
                     { label: "Profit", value: `£${(revenue - cost).toFixed(2)}`, highlight: true },
                   ].map((s) => (
-                    <div key={s.label} className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-3">
-                      <span className="text-xs text-[#8A7F63] uppercase tracking-wide block mb-1">{s.label}</span>
+                    <div
+                      key={s.label}
+                      className={`rounded-sm p-3 border ${
+                        s.highlight ? "bg-[#3F5E42]/10 border-[#3F5E42]/40" : "bg-[#F7F3E8] border-[#C9BFA3]"
+                      }`}
+                    >
+                      <span className={`text-xs uppercase tracking-wide block mb-1 ${s.highlight ? "text-[#3F5E42]" : "text-[#8A7F63]"}`}>
+                        {s.label}
+                      </span>
                       <span className={`font-mono text-xl ${s.highlight ? "text-[#3F5E42] font-bold" : ""}`}>{s.value}</span>
                     </div>
                   ))}
@@ -869,7 +838,7 @@ export default function Home() {
                 </div>
 
                 {needsAttention.length > 0 && (
-                  <div>
+                  <div className="mb-8">
                     <p className="text-xs font-semibold text-[#A63A2E] uppercase tracking-wide mb-2">
                       Needs attention ({needsAttention.length})
                     </p>
@@ -886,6 +855,17 @@ export default function Home() {
                           <span className="text-sm truncate flex-1">{e.title}</span>
                           <StatusBadge status={e.status} />
                         </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {recent.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-[#8A7F63] uppercase tracking-wide mb-2">Recently captured</p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {recent.map((e) => (
+                        <StockListRow key={e.id} item={e} onOpen={openItem} />
                       ))}
                     </div>
                   </div>
@@ -1082,9 +1062,9 @@ export default function Home() {
                     </p>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
                     {filteredItems.map((e) => (
-                      <StockCard key={e.id} item={e} onOpen={openItem} />
+                      <StockListRow key={e.id} item={e} onOpen={openItem} />
                     ))}
                   </div>
                 )}
