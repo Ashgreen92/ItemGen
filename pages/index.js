@@ -79,8 +79,8 @@ async function ensureUnderSizeLimit(photos, maxTotalBytes = 3200000) {
   return current;
 }
 
-async function analyzeItem(photos, knownSize, knownDetails) {
-  const bodyStr = JSON.stringify({ photos, knownSize, knownDetails });
+async function analyzeItem(photos) {
+  const bodyStr = JSON.stringify({ photos });
   const res = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -307,6 +307,7 @@ function ListingHelper({ item }) {
       <div className="flex flex-col gap-2">
         <CopyField label="Title" value={item.title} charLimit={80} />
         <CopyField label="Starting price (consider allowing offers up to the high end)" value={priceLabel} />
+        {item.size_applicable && <CopyField label="Size" value={item.size} />}
         <CopyField label="Category" value={item.category} />
         <CopyField label="Condition" value={item.condition} />
         <CopyField label="Description" value={item.description} />
@@ -522,8 +523,6 @@ export default function Home() {
   const [loadedItems, setLoadedItems] = useState(false);
   const [currentPhotos, setCurrentPhotos] = useState([]);
   const [currentBatch, setCurrentBatch] = useState("");
-  const [currentSize, setCurrentSize] = useState("");
-  const [currentKnownDetails, setCurrentKnownDetails] = useState("");
   const [batchFilter, setBatchFilter] = useState("all");
   const [capturing, setCapturing] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
@@ -584,10 +583,10 @@ export default function Home() {
     }
   };
 
-  const processItem = useCallback(async (id, photos, knownSize, knownDetails) => {
+  const processItem = useCallback(async (id, photos) => {
     try {
       const safePhotos = await ensureUnderSizeLimit(photos);
-      const result = await analyzeItem(safePhotos, knownSize, knownDetails);
+      const result = await analyzeItem(safePhotos);
       await supabase
         .from("items")
         .update({
@@ -601,6 +600,8 @@ export default function Home() {
           confidence: result.confidence || "medium",
           notes: result.notes || "",
           verify_before_listing: Array.isArray(result.verify_before_listing) ? result.verify_before_listing : [],
+          size: result.size || null,
+          size_applicable: result.size_applicable === true,
           status: "ready",
         })
         .eq("id", id);
@@ -615,8 +616,6 @@ export default function Home() {
     if (currentPhotos.length === 0) return;
     try {
       const thumbnail = await resizeDataUrl(currentPhotos[0], 600, 0.65).catch(() => currentPhotos[0]);
-      const knownSize = currentSize.trim();
-      const knownDetails = currentKnownDetails.trim();
       const { data, error } = await supabase
         .from("items")
         .insert({
@@ -625,18 +624,14 @@ export default function Home() {
           photos: currentPhotos,
           thumbnail,
           batch: currentBatch.trim() || null,
-          known_size: knownSize || null,
-          known_details: knownDetails || null,
         })
         .select()
         .single();
 
       if (error) throw error;
       setCurrentPhotos([]);
-      setCurrentSize("");
-      setCurrentKnownDetails("");
       fetchItems();
-      processItem(data.id, currentPhotos, knownSize, knownDetails);
+      processItem(data.id, currentPhotos);
     } catch (err) {
       console.error("handleNextItem failed:", err);
       alert("Next item failed: " + (err.message || JSON.stringify(err)));
@@ -647,6 +642,7 @@ export default function Home() {
     setSelectedItem(item);
     setEditDraft(item);
     setEditing(false);
+    setSizeGateInput("");
   };
   const closeItem = () => {
     setSelectedItem(null);
@@ -675,7 +671,18 @@ export default function Home() {
     await supabase.from("items").update({ status: "processing" }).eq("id", item.id);
     setSelectedItem({ ...item, status: "processing" });
     fetchItems();
-    processItem(item.id, item.photos, item.known_size, item.known_details);
+    processItem(item.id, item.photos);
+  };
+
+  const [sizeGateInput, setSizeGateInput] = useState("");
+
+  const confirmSizeGate = async (withValue) => {
+    const size = withValue ? sizeGateInput.trim() : "Not specified";
+    await supabase.from("items").update({ size }).eq("id", selectedItem.id);
+    setSelectedItem((s) => ({ ...s, size }));
+    setEditDraft((d) => (d ? { ...d, size } : d));
+    setSizeGateInput("");
+    fetchItems();
   };
 
   const [soldFormFor, setSoldFormFor] = useState(null);
@@ -773,26 +780,6 @@ export default function Home() {
                 Every item you capture will be tagged "{currentBatch}" until you change or clear this.
               </p>
             )}
-          </div>
-
-          <div className="mb-4 bg-[#3F5E42]/8 border border-[#3F5E42]/30 rounded-sm p-3">
-            <p className="text-xs font-semibold text-[#3F5E42] uppercase tracking-wide mb-2">
-              Know something the camera can't see? Tell it here — the AI can't reliably read sizes or fine print, but you can
-            </p>
-            <label className="text-xs text-[#8A7F63] mb-1 block">Size (if you know it)</label>
-            <input
-              value={currentSize}
-              onChange={(e) => setCurrentSize(e.target.value)}
-              placeholder="e.g. UK 10, Men's L, EU 42"
-              className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm mb-2"
-            />
-            <label className="text-xs text-[#8A7F63] mb-1 block">Other known details (material, flaws, brand, etc.)</label>
-            <input
-              value={currentKnownDetails}
-              onChange={(e) => setCurrentKnownDetails(e.target.value)}
-              placeholder="e.g. 100% wool, small mark on cuff"
-              className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
-            />
           </div>
 
           <p className="text-[#6B6250] text-sm mb-4">
@@ -1100,7 +1087,40 @@ export default function Home() {
               </div>
             )}
 
-            {selectedItem.status === "ready" && editDraft && (
+            {selectedItem.status === "ready" && editDraft && selectedItem.size_applicable && !selectedItem.size && (
+              <div className="bg-[#A9822E]/10 border border-[#A9822E]/40 rounded-sm p-4 mb-4">
+                <p className="font-serif text-lg mb-1">What size is this?</p>
+                <p className="text-xs text-[#8A7F63] mb-3">
+                  The AI couldn't read a size from the photos. Enter it to unlock the rest of the listing.
+                </p>
+                <input
+                  value={sizeGateInput}
+                  onChange={(e) => setSizeGateInput(e.target.value)}
+                  placeholder="e.g. UK 10, Men's L, EU 42"
+                  className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm mb-3"
+                  autoFocus
+                />
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => confirmSizeGate(false)}
+                    className="flex-1 py-2.5 rounded bg-[#DCD4BC] text-[#2B2620] font-medium text-sm"
+                  >
+                    Not sure / skip
+                  </button>
+                  <button
+                    onClick={() => confirmSizeGate(true)}
+                    disabled={!sizeGateInput.trim()}
+                    className="flex-1 py-2.5 rounded bg-[#A9822E] text-[#2B2620] font-bold disabled:opacity-40"
+                  >
+                    Confirm size
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {selectedItem.status === "ready" &&
+              editDraft &&
+              !(selectedItem.size_applicable && !selectedItem.size) && (
               <>
                 <ListingHelper item={selectedItem} />
 
