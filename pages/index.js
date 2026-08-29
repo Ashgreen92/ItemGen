@@ -274,24 +274,34 @@ function StockCard({ item: e, onOpen }) {
           </div>
         )}
       </div>
-      <div className="p-3">
-        <div className="font-medium text-sm truncate">{e.title}</div>
-        <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+      <div className="p-2.5">
+        <div className="font-medium text-sm truncate mb-1">{e.title}</div>
+        <div className="flex items-center gap-1.5 flex-wrap mb-1.5">
           <StatusBadge status={e.status} />
           {e.status === "sold" && e.sale_price != null ? (
-            <span className="text-[#3F5E42] font-mono font-semibold text-sm">Sold £{e.sale_price}</span>
+            <span className="text-[#3F5E42] font-mono font-semibold text-sm">£{e.sale_price}</span>
           ) : (
             e.status === "ready" && <PriceTag low={e.price_low} high={e.price_high} />
           )}
         </div>
-        <span className="text-xs font-mono text-[#8A7F63] block mt-1">
-          #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
-        </span>
-        {isListed && (
-          <span className="text-sm font-bold text-[#3F5E42] block mt-1">
-            ✓ {[e.ebay_listed && "eBay", e.vinted_listed && "Vinted", e.depop_listed && "Depop"].filter(Boolean).join(" · ")}
+        <div className="flex items-center justify-between gap-1">
+          <span className="text-xs font-mono text-[#8A7F63] truncate">
+            #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
           </span>
-        )}
+          {isListed && (
+            <div className="flex gap-0.5 shrink-0">
+              {e.ebay_listed && (
+                <span className="w-4 h-4 rounded-sm bg-[#3F5E42]/15 text-[#3F5E42] text-[8px] font-bold flex items-center justify-center" title="eBay">EB</span>
+              )}
+              {e.vinted_listed && (
+                <span className="w-4 h-4 rounded-sm bg-[#3F5E42]/15 text-[#3F5E42] text-[8px] font-bold flex items-center justify-center" title="Vinted">VI</span>
+              )}
+              {e.depop_listed && (
+                <span className="w-4 h-4 rounded-sm bg-[#3F5E42]/15 text-[#3F5E42] text-[8px] font-bold flex items-center justify-center" title="Depop">DE</span>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -518,13 +528,14 @@ export default function Home() {
   const [unlocked, setUnlocked] = useState(!process.env.NEXT_PUBLIC_APP_PASSCODE);
   const [checkedLock, setCheckedLock] = useState(false);
 
-  const [view, setView] = useState("capture");
+  const [view, setView] = useState("dashboard");
   const [items, setItems] = useState([]);
   const [stockFilter, setStockFilter] = useState("active");
   const [loadedItems, setLoadedItems] = useState(false);
   const [currentPhotos, setCurrentPhotos] = useState([]);
   const [currentBatch, setCurrentBatch] = useState("");
   const [batchFilter, setBatchFilter] = useState("all");
+  const [stockSearch, setStockSearch] = useState("");
   const [capturing, setCapturing] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
   const [saveDirHandle, setSaveDirHandle] = useState(null);
@@ -788,6 +799,12 @@ export default function Home() {
         </div>
         <div className="flex bg-[#F7F3E8] rounded-sm p-0.5 border border-[#C9BFA3]">
           <button
+            onClick={() => setView("dashboard")}
+            className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "dashboard" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
+          >
+            Dashboard
+          </button>
+          <button
             onClick={() => setView("capture")}
             className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "capture" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
           >
@@ -801,6 +818,83 @@ export default function Home() {
           </button>
         </div>
       </div>
+
+      {view === "dashboard" && (
+        <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
+          {(() => {
+            const soldItems = items.filter((e) => e.status === "sold");
+            const activeItems = items.filter((e) => e.status !== "sold");
+            const revenue = soldItems.reduce((s, e) => s + (Number(e.sale_price) || 0), 0);
+            const cost = soldItems.reduce((s, e) => s + (Number(e.cost_price) || 0), 0);
+            const needsAttention = items.filter((e) => e.status === "needs_size" || e.status === "error");
+
+            return (
+              <>
+                <p className="font-serif text-2xl mb-6">Dashboard</p>
+
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-8">
+                  {[
+                    { label: "Active stock", value: activeItems.length },
+                    { label: "Sold", value: soldItems.length },
+                    { label: "Revenue", value: `£${revenue.toFixed(2)}` },
+                    { label: "Cost", value: `£${cost.toFixed(2)}` },
+                    { label: "Profit", value: `£${(revenue - cost).toFixed(2)}`, highlight: true },
+                  ].map((s) => (
+                    <div key={s.label} className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-3">
+                      <span className="text-xs text-[#8A7F63] uppercase tracking-wide block mb-1">{s.label}</span>
+                      <span className={`font-mono text-xl ${s.highlight ? "text-[#3F5E42] font-bold" : ""}`}>{s.value}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex gap-2 mb-8">
+                  <button
+                    onClick={() => setView("capture")}
+                    className="flex-1 py-3 rounded bg-[#A9822E] text-[#2B2620] font-bold flex items-center justify-center gap-2"
+                  >
+                    <Camera size={16} />
+                    Capture new item
+                  </button>
+                  <button
+                    onClick={() => {
+                      setStockFilter("active");
+                      setBatchFilter("all");
+                      setStockSearch("");
+                      setView("stock");
+                    }}
+                    className="flex-1 py-3 rounded bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-medium"
+                  >
+                    View all stock
+                  </button>
+                </div>
+
+                {needsAttention.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-[#A63A2E] uppercase tracking-wide mb-2">
+                      Needs attention ({needsAttention.length})
+                    </p>
+                    <div className="flex flex-col gap-2">
+                      {needsAttention.map((e) => (
+                        <button
+                          key={e.id}
+                          onClick={() => openItem(e)}
+                          className="flex items-center gap-3 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-2.5 text-left"
+                        >
+                          <div className="w-10 h-10 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0">
+                            {e.thumbnail && <img src={e.thumbnail} alt="" className="w-full h-full object-cover" />}
+                          </div>
+                          <span className="text-sm truncate flex-1">{e.title}</span>
+                          <StatusBadge status={e.status} />
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            );
+          })()}
+        </div>
+      )}
 
       {view === "capture" && (
         <div className="flex-1 flex flex-col p-4 sm:p-8 max-w-xl w-full mx-auto">
@@ -934,6 +1028,13 @@ export default function Home() {
             </button>
           </div>
 
+          <input
+            value={stockSearch}
+            onChange={(e) => setStockSearch(e.target.value)}
+            placeholder="Search stock by title…"
+            className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm mb-4"
+          />
+
           {(() => {
             const batches = [...new Set(items.map((i) => i.batch).filter(Boolean))].sort();
             return batches.length > 0 ? (
@@ -964,34 +1065,11 @@ export default function Home() {
           {(() => {
             const filteredItems = items
               .filter((e) => (stockFilter === "all" ? true : stockFilter === "sold" ? e.status === "sold" : e.status !== "sold"))
-              .filter((e) => (batchFilter === "all" ? true : e.batch === batchFilter));
-            const soldItems = items.filter((e) => e.status === "sold");
-            const revenue = soldItems.reduce((s, e) => s + (Number(e.sale_price) || 0), 0);
-            const cost = soldItems.reduce((s, e) => s + (Number(e.cost_price) || 0), 0);
+              .filter((e) => (batchFilter === "all" ? true : e.batch === batchFilter))
+              .filter((e) => (stockSearch.trim() ? (e.title || "").toLowerCase().includes(stockSearch.trim().toLowerCase()) : true));
 
             return (
               <>
-                {stockFilter === "sold" && soldItems.length > 0 && (
-                  <div className="flex flex-wrap gap-x-8 gap-y-2 mb-5 px-1 font-mono text-sm">
-                    <div>
-                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Sold</span>
-                      <span className="text-lg">{soldItems.length}</span>
-                    </div>
-                    <div>
-                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Revenue</span>
-                      <span className="text-lg">£{revenue.toFixed(2)}</span>
-                    </div>
-                    <div>
-                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Cost</span>
-                      <span className="text-lg">£{cost.toFixed(2)}</span>
-                    </div>
-                    <div>
-                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Profit</span>
-                      <span className="text-lg text-[#3F5E42] font-bold">£{(revenue - cost).toFixed(2)}</span>
-                    </div>
-                  </div>
-                )}
-
                 {!loadedItems ? (
                   <div className="flex items-center justify-center py-20 text-[#8A7F63]">
                     <Loader2 size={20} className="animate-spin" />
