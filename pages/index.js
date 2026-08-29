@@ -53,13 +53,34 @@ function resizeDataUrl(dataUrl, maxWidth, quality) {
   });
 }
 
+async function ensureUnderSizeLimit(photos, maxTotalBytes = 3500000) {
+  let current = photos;
+  let quality = 0.6;
+  let width = 800;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const totalBytes = current.reduce((sum, p) => sum + p.length * 0.75, 0);
+    if (totalBytes <= maxTotalBytes) return current;
+    quality = Math.max(0.3, quality - 0.15);
+    width = Math.max(400, Math.round(width * 0.75));
+    current = await Promise.all(current.map((p) => resizeDataUrl(p, width, quality).catch(() => p)));
+  }
+  return current;
+}
+
 async function analyzeItem(photos) {
   const res = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ photos }),
   });
-  if (!res.ok) throw new Error("AI request failed");
+  if (!res.ok) {
+    let detail = "AI request failed";
+    try {
+      const body = await res.json();
+      detail = body.error || detail;
+    } catch {}
+    throw new Error(`${detail} (HTTP ${res.status})`);
+  }
   return res.json();
 }
 
@@ -414,7 +435,7 @@ export default function Home() {
     if (!file) return;
     setCapturing(true);
     try {
-      const full = await compressImage(file, 900, 0.65);
+      const full = await compressImage(file, 800, 0.6);
       setCurrentPhotos((prev) => [...prev, full].slice(0, 5));
     } catch (err) {
       console.error(err);
@@ -426,7 +447,8 @@ export default function Home() {
 
   const processItem = useCallback(async (id, photos) => {
     try {
-      const result = await analyzeItem(photos);
+      const safePhotos = await ensureUnderSizeLimit(photos);
+      const result = await analyzeItem(safePhotos);
       await supabase
         .from("items")
         .update({
@@ -445,7 +467,7 @@ export default function Home() {
         .eq("id", id);
     } catch (err) {
       console.error(err);
-      await supabase.from("items").update({ status: "error" }).eq("id", id);
+      await supabase.from("items").update({ status: "error", error_detail: err.message || String(err) }).eq("id", id);
     }
     fetchItems();
   }, [fetchItems]);
@@ -868,6 +890,9 @@ export default function Home() {
                 <AlertCircle size={16} className="text-[#A63A2E] shrink-0 mt-0.5" />
                 <div className="flex-1">
                   <p className="text-sm text-[#A63A2E] mb-2">Couldn't generate an ad for this item.</p>
+                  {selectedItem.error_detail && (
+                    <p className="text-xs text-[#A63A2E]/80 font-mono mb-2">{selectedItem.error_detail}</p>
+                  )}
                   <button onClick={() => retryItem(selectedItem)} className="flex items-center gap-1.5 text-xs font-medium bg-[#A63A2E]/15 px-2.5 py-1.5 rounded-md">
                     <RefreshCw size={12} /> Retry
                   </button>
