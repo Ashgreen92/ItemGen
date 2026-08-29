@@ -252,6 +252,7 @@ export default function Home() {
   const [capturing, setCapturing] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
+  const [editing, setEditing] = useState(false);
   const pollRef = useRef(null);
 
   useEffect(() => {
@@ -325,7 +326,7 @@ export default function Home() {
   const handleNextItem = async () => {
     if (currentPhotos.length === 0) return;
     try {
-      const thumbnail = await resizeDataUrl(currentPhotos[0], 160, 0.5).catch(() => currentPhotos[0]);
+      const thumbnail = await resizeDataUrl(currentPhotos[0], 600, 0.65).catch(() => currentPhotos[0]);
       const { data, error } = await supabase
         .from("items")
         .insert({
@@ -350,10 +351,12 @@ export default function Home() {
   const openItem = (item) => {
     setSelectedItem(item);
     setEditDraft(item);
+    setEditing(false);
   };
   const closeItem = () => {
     setSelectedItem(null);
     setEditDraft(null);
+    setEditing(false);
   };
 
   const saveEdits = async () => {
@@ -576,7 +579,9 @@ export default function Home() {
                         className="text-left bg-[#F7F3E8] border border-[#C9BFA3] rounded overflow-hidden active:scale-[0.99] transition"
                       >
                         <div className="aspect-square bg-[#DCD4BC] relative overflow-hidden">
-                          {e.thumbnail && <img src={e.thumbnail} alt="" className="w-full h-full object-cover" />}
+                          {(e.photos?.[0] || e.thumbnail) && (
+                            <img src={e.photos?.[0] || e.thumbnail} alt="" className="w-full h-full object-cover" />
+                          )}
                           {e.status === "sold" && (
                             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                               <span
@@ -725,96 +730,116 @@ export default function Home() {
 
             {selectedItem.status === "ready" && editDraft && (
               <>
-                <button
-                  onClick={() => openSoldForm(selectedItem)}
-                  className="w-full py-2.5 mb-4 rounded bg-[#DCD4BC] text-[#2B2620] font-medium flex items-center justify-center gap-2 active:scale-[0.98] transition"
-                >
-                  <Check size={15} />
-                  Mark as Sold
-                </button>
-
                 <ListingHelper item={selectedItem} />
 
-                <p className="text-xs text-[#8A7F63] mb-3 border-t border-[#C9BFA3] pt-4">
-                  Need to correct something? Edit below, then save — the copy fields above update too.
-                </p>
+                {!editing ? (
+                  <button
+                    onClick={() => setEditing(true)}
+                    className="w-full py-2.5 mb-4 rounded bg-[#DCD4BC] text-[#2B2620] font-medium flex items-center justify-center gap-2 active:scale-[0.98] transition"
+                  >
+                    <Pencil size={15} />
+                    Edit details
+                  </button>
+                ) : (
+                  <div className="flex flex-col gap-4 mb-4 border-t border-[#C9BFA3] pt-4">
+                    <div>
+                      <label className="text-xs text-[#8A7F63] mb-1 block">Title</label>
+                      <input
+                        value={editDraft.title || ""}
+                        onChange={(e) => setEditDraft({ ...editDraft, title: e.target.value })}
+                        className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
+                      />
+                    </div>
 
-                <div className="flex flex-col gap-4">
-                  <div>
-                    <label className="text-xs text-[#8A7F63] mb-1 block">Title</label>
-                    <input
-                    value={editDraft.title || ""}
-                    onChange={(e) => setEditDraft({ ...editDraft, title: e.target.value })}
-                    className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
-                  />
-                </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs text-[#8A7F63] mb-1 block">Price low (£)</label>
+                        <input
+                          type="number"
+                          value={editDraft.price_low ?? ""}
+                          onChange={(e) => setEditDraft({ ...editDraft, price_low: e.target.value === "" ? null : Number(e.target.value) })}
+                          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm tabular-nums"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-[#8A7F63] mb-1 block">Price high (£)</label>
+                        <input
+                          type="number"
+                          value={editDraft.price_high ?? ""}
+                          onChange={(e) => setEditDraft({ ...editDraft, price_high: e.target.value === "" ? null : Number(e.target.value) })}
+                          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm tabular-nums"
+                        />
+                      </div>
+                    </div>
 
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs text-[#8A7F63] mb-1 block">Price low (£)</label>
-                    <input
-                      type="number"
-                      value={editDraft.price_low ?? ""}
-                      onChange={(e) => setEditDraft({ ...editDraft, price_low: e.target.value === "" ? null : Number(e.target.value) })}
-                      className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm tabular-nums"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-[#8A7F63] mb-1 block">Price high (£)</label>
-                    <input
-                      type="number"
-                      value={editDraft.price_high ?? ""}
-                      onChange={(e) => setEditDraft({ ...editDraft, price_high: e.target.value === "" ? null : Number(e.target.value) })}
-                      className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm tabular-nums"
-                    />
-                  </div>
-                </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs text-[#8A7F63] mb-1 block">Category</label>
+                        <input
+                          value={editDraft.category || ""}
+                          onChange={(e) => setEditDraft({ ...editDraft, category: e.target.value })}
+                          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-[#8A7F63] mb-1 block">Condition</label>
+                        <input
+                          value={editDraft.condition || ""}
+                          onChange={(e) => setEditDraft({ ...editDraft, condition: e.target.value })}
+                          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
+                        />
+                      </div>
+                    </div>
 
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs text-[#8A7F63] mb-1 block">Category</label>
-                    <input
-                      value={editDraft.category || ""}
-                      onChange={(e) => setEditDraft({ ...editDraft, category: e.target.value })}
-                      className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-[#8A7F63] mb-1 block">Condition</label>
-                    <input
-                      value={editDraft.condition || ""}
-                      onChange={(e) => setEditDraft({ ...editDraft, condition: e.target.value })}
-                      className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
-                    />
-                  </div>
-                </div>
+                    <div>
+                      <label className="text-xs text-[#8A7F63] mb-1 block">Description</label>
+                      <textarea
+                        value={editDraft.description || ""}
+                        onChange={(e) => setEditDraft({ ...editDraft, description: e.target.value })}
+                        rows={4}
+                        className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm resize-none"
+                      />
+                    </div>
 
-                <div>
-                  <label className="text-xs text-[#8A7F63] mb-1 block">Description</label>
-                  <textarea
-                    value={editDraft.description || ""}
-                    onChange={(e) => setEditDraft({ ...editDraft, description: e.target.value })}
-                    rows={4}
-                    className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm resize-none"
-                  />
-                </div>
+                    {editDraft.notes && (
+                      <div className="bg-[#A9822E]/10 border border-[#A9822E]/20 rounded-sm p-3 text-xs text-[#A9822E]/90">
+                        <span className="font-medium">AI note: </span>
+                        {editDraft.notes}
+                        {editDraft.confidence && <span className="text-[#A9822E]/60"> · confidence: {editDraft.confidence}</span>}
+                      </div>
+                    )}
 
-                {editDraft.notes && (
-                  <div className="bg-[#A9822E]/10 border border-[#A9822E]/20 rounded-sm p-3 text-xs text-[#A9822E]/90">
-                    <span className="font-medium">AI note: </span>
-                    {editDraft.notes}
-                    {editDraft.confidence && <span className="text-[#A9822E]/60"> · confidence: {editDraft.confidence}</span>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          setEditDraft(selectedItem);
+                          setEditing(false);
+                        }}
+                        className="flex-1 py-3 rounded bg-[#DCD4BC] text-[#2B2620] font-medium"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => {
+                          saveEdits();
+                          setEditing(false);
+                        }}
+                        className="flex-1 py-3 rounded bg-[#A9822E] text-[#2B2620] font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
+                      >
+                        <Pencil size={15} />
+                        Save changes
+                      </button>
+                    </div>
                   </div>
                 )}
 
                 <button
-                  onClick={saveEdits}
-                  className="w-full py-3 rounded bg-[#A9822E] text-[#2B2620] font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
+                  onClick={() => openSoldForm(selectedItem)}
+                  className="w-full py-2.5 rounded bg-[#A9822E] text-[#2B2620] font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
                 >
-                  <Pencil size={15} />
-                  Save changes
+                  <Check size={15} />
+                  Mark as Sold
                 </button>
-                </div>
               </>
             )}
           </div>
