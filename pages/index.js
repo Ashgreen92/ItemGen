@@ -193,6 +193,7 @@ function DownloadablePhotos({ item }) {
     </div>
   );
 }
+  function PasscodeGate({ onUnlock }) {
   const [value, setValue] = useState("");
   const [error, setError] = useState(false);
   const expected = process.env.NEXT_PUBLIC_APP_PASSCODE;
