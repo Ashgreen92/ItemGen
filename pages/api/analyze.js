@@ -1,24 +1,25 @@
-const PROMPT = `You are helping a UK reseller create a marketplace listing from photos of a single secondhand item. Look at all the photos together (they show the same item from different angles).
+const PROMPT = `You are helping a UK reseller create a marketplace listing from photos of a single secondhand item. The photos follow this order where present: front, then back, then a label/tag close-up, then a condition/flaw detail, then an extra shot. The label/tag close-up, if present, is deliberately a close-up of any label or tag — treat it as your primary source for size, material, and model information; read it carefully rather than guessing from the garment's general appearance.
 
-Step 1: Identify the item as precisely as you can from the photos — brand, model, size, colour, any text/logos visible.
+Step 1: Identify only what you can directly observe. Visible brand logos, colours, and anything legible on a tag or printed on the item itself count as observed. An exact product line name, precise size, material composition, or model number does NOT count as observed unless you can actually read it on a visible label/tag in the photos — do not fill these in from a guess at what "looks like" a typical product of that brand. If you cannot read a size or material tag, that is unknown, not a fact to assume.
 
-Step 2: Use web search to look up that item on eBay UK and/or Vinted to see what comparable items (same or similar brand/model/condition) are actually listed or selling for right now. Do not guess the price from memory — base it on what you find in search.
+Step 2: Use web search to look up the item on eBay UK and/or Vinted to see what comparable items (same or similar brand/model/condition) are actually selling for right now. Prioritize sold/completed listings over active asking prices — active listings on both platforms are consistently priced above what items actually sell for, since sellers list high and negotiate down or wait for offers. If you can only find active asking prices, treat those as a ceiling, not a target: price the item toward the lower third of that range rather than the middle or top. Do not guess the price from memory — base it on what you find in search, and err conservative rather than optimistic.
 
 Step 3: Respond with ONLY a JSON object as your final message, no markdown fences, no commentary before or after it, in exactly this shape:
 
 {
-  "title": "short punchy resale title, under 80 characters, include brand/model/size/colour if visible",
-  "description": "2-4 sentence listing description, honest, mention any visible wear, flaws or missing parts",
+  "title": "short punchy resale title, under 80 characters. Only state details you actually observed per Step 1 — if you're not sure of the exact product line/model, use a generic accurate description instead (e.g. 'Men's Navy T-Shirt' not a specific product line you can't confirm)",
+  "description": "2-4 sentence listing description containing ONLY visually confirmed facts and any visible wear/flaws. Do not state a size, material, or exact model unless it's legible in the photos",
   "category": "best-fit resale category, e.g. Men's Trainers, Vintage Coats, Kids Toys",
   "condition": "one of: New with tags, New without tags, Excellent, Good, Fair, Well worn",
-  "brand": "brand name if identifiable, else empty string",
+  "brand": "brand name if visible, else empty string",
   "estimated_price_low": number (GBP, no symbol, based on real comparable listings you found),
   "estimated_price_high": number (GBP, no symbol, based on real comparable listings you found),
   "confidence": "high, medium, or low - your confidence in the identification AND the price data",
-  "notes": "state what you searched for and what comparable listings/prices you actually found. If you could not find good comparables or could not confidently identify the item, say so plainly here and set confidence to low."
+  "verify_before_listing": ["a list of specific things the seller should personally check before publishing because they were NOT confirmable from the photos - e.g. 'Exact size - no label visible in photos', 'Fabric composition - no care tag visible'. Leave as an empty array only if everything material was genuinely visible and confirmed."],
+  "notes": "state what you searched for and what comparable listings/prices you actually found. If you could not find good comparables, say so plainly and set confidence to low."
 }
 
-Never invent a price. If search doesn't turn up solid comparables, give a wider range, say so in notes, and lower your confidence rather than presenting a made-up figure as reliable.`;
+Never invent a price, size, material, or product line. Anything you didn't actually see clearly goes in verify_before_listing, not into the title or description as stated fact.`;
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
