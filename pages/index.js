@@ -79,8 +79,8 @@ async function ensureUnderSizeLimit(photos, maxTotalBytes = 3200000) {
   return current;
 }
 
-async function analyzeItem(photos, mode, confirmedSize) {
-  const bodyStr = JSON.stringify({ photos, mode, confirmedSize });
+async function analyzeItem(photos, mode, confirmedFields) {
+  const bodyStr = JSON.stringify({ photos, mode, confirmedFields });
   const res = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -584,10 +584,10 @@ export default function Home() {
     }
   };
 
-  const runFullGeneration = useCallback(async (id, photos, confirmedSize) => {
+  const runFullGeneration = useCallback(async (id, photos, confirmedFields) => {
     try {
       const safePhotos = await ensureUnderSizeLimit(photos);
-      const result = await analyzeItem(safePhotos, "full", confirmedSize || null);
+      const result = await analyzeItem(safePhotos, "full", confirmedFields || null);
       await supabase
         .from("items")
         .update({
@@ -628,7 +628,7 @@ export default function Home() {
       }
 
       await supabase.from("items").update({ size_applicable: sizeApplicable, size }).eq("id", id);
-      await runFullGeneration(id, photos, sizeApplicable ? size : null);
+      await runFullGeneration(id, photos, sizeApplicable && size ? { size } : null);
     } catch (err) {
       console.error(err);
       await supabase.from("items").update({ status: "error", error_detail: err.message || String(err) }).eq("id", id);
@@ -685,10 +685,30 @@ export default function Home() {
         condition: editDraft.condition,
         price_low: editDraft.price_low,
         price_high: editDraft.price_high,
+        size: editDraft.size,
+        brand: editDraft.brand,
       })
       .eq("id", editDraft.id);
     setSelectedItem(editDraft);
     fetchItems();
+  };
+
+  const refreshWithAI = async () => {
+    if (!editDraft) return;
+    const confirmedFields = {};
+    if (editDraft.size?.trim()) confirmedFields.size = editDraft.size.trim();
+    if (editDraft.category?.trim()) confirmedFields.category = editDraft.category.trim();
+    if (editDraft.condition?.trim()) confirmedFields.condition = editDraft.condition.trim();
+    if (editDraft.brand?.trim()) confirmedFields.brand = editDraft.brand.trim();
+
+    await supabase
+      .from("items")
+      .update({ category: editDraft.category, condition: editDraft.condition, status: "processing" })
+      .eq("id", editDraft.id);
+    setSelectedItem((s) => ({ ...s, status: "processing" }));
+    setEditing(false);
+    fetchItems();
+    runFullGeneration(editDraft.id, editDraft.photos, Object.keys(confirmedFields).length ? confirmedFields : null);
   };
 
   const retryItem = async (item) => {
@@ -707,7 +727,7 @@ export default function Home() {
     setSelectedItem((s) => ({ ...s, size, status: "processing" }));
     setSizeGateInput("");
     fetchItems();
-    runFullGeneration(item.id, item.photos, size === "Not specified" ? null : size);
+    runFullGeneration(item.id, item.photos, size === "Not specified" ? null : { size });
   };
 
   const [soldFormFor, setSoldFormFor] = useState(null);
@@ -1224,6 +1244,26 @@ export default function Home() {
                       </div>
                     </div>
 
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs text-[#8A7F63] mb-1 block">Size</label>
+                        <input
+                          value={editDraft.size || ""}
+                          onChange={(e) => setEditDraft({ ...editDraft, size: e.target.value })}
+                          placeholder="e.g. UK 10, Men's L"
+                          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs text-[#8A7F63] mb-1 block">Brand</label>
+                        <input
+                          value={editDraft.brand || ""}
+                          onChange={(e) => setEditDraft({ ...editDraft, brand: e.target.value })}
+                          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
+                        />
+                      </div>
+                    </div>
+
                     <div>
                       <label className="text-xs text-[#8A7F63] mb-1 block">Description</label>
                       <textarea
@@ -1257,12 +1297,22 @@ export default function Home() {
                           saveEdits();
                           setEditing(false);
                         }}
-                        className="flex-1 py-3 rounded bg-[#A9822E] text-[#2B2620] font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
+                        className="flex-1 py-3 rounded bg-[#DCD4BC] text-[#2B2620] font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
                       >
                         <Pencil size={15} />
-                        Save changes
+                        Save only
                       </button>
                     </div>
+                    <button
+                      onClick={refreshWithAI}
+                      className="w-full mt-2 py-3 rounded bg-[#A9822E] text-[#2B2620] font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
+                    >
+                      <RefreshCw size={15} />
+                      Save & refresh title/description with AI
+                    </button>
+                    <p className="text-xs text-[#8A7F63] mt-1.5">
+                      Uses your corrections above (size, category, condition, brand) as confirmed fact and rewrites the title and description to match.
+                    </p>
                   </div>
                 )}
 
