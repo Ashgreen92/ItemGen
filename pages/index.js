@@ -341,6 +341,7 @@ export default function Home() {
       processItem(data.id, currentPhotos);
     } catch (err) {
       console.error("handleNextItem failed:", err);
+              alert("Next item failed: " + (err.message || JSON.stringify(err)));
     }
   };
 
