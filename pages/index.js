@@ -214,6 +214,19 @@ function ListedToggles({ item, onToggle }) {
     </div>
   );
 }
+function timeAgo(iso) {
+  if (!iso) return "";
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "Just now";
+  if (mins < 60) return `${mins} min${mins === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days} day${days === 1 ? "" : "s"} ago`;
+  return fmtDate(iso);
+}
+
 function StockListRow({ item: e, onOpen }) {
   const isListed = e.ebay_listed || e.vinted_listed || e.depop_listed;
   const thumb = e.photos?.[0] || e.thumbnail;
@@ -221,15 +234,15 @@ function StockListRow({ item: e, onOpen }) {
   return (
     <button
       onClick={() => onOpen(e)}
-      className={`w-full flex items-center gap-3 text-left rounded-sm border p-2 transition active:scale-[0.99] ${
+      className={`w-full flex items-center gap-3 text-left rounded-sm border p-2.5 transition active:scale-[0.99] ${
         isListed ? "bg-[#3F5E42]/8 border-[#3F5E42]/40" : "bg-[#F7F3E8] border-[#C9BFA3]"
       }`}
     >
-      <div className="w-14 h-14 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0 relative">
+      <div className="w-20 h-20 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0 relative">
         {thumb && <img src={thumb} alt="" className="w-full h-full object-cover" />}
         {e.status === "sold" && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ mixBlendMode: "multiply" }}>
-            <span className="text-[#A63A2E] border-2 border-[#A63A2E] px-1 -rotate-12 font-mono font-bold text-[9px] tracking-widest uppercase opacity-90">
+            <span className="text-[#A63A2E] border-2 border-[#A63A2E] px-1.5 py-0.5 -rotate-12 font-mono font-bold text-[10px] tracking-widest uppercase opacity-90">
               Sold
             </span>
           </div>
@@ -238,12 +251,11 @@ function StockListRow({ item: e, onOpen }) {
 
       <div className="flex-1 min-w-0">
         <div className="font-medium text-sm truncate">{e.title}</div>
-        <div className="flex items-center gap-2 flex-wrap mt-1">
+        <div className="text-xs text-[#8A7F63] mt-0.5">Added {timeAgo(e.created_at)}</div>
+        <div className="flex items-center gap-2 flex-wrap mt-1.5">
           <StatusBadge status={e.status} />
-          {e.status === "sold" && e.sale_price != null ? (
-            <span className="text-[#3F5E42] font-mono font-semibold text-sm">£{e.sale_price}</span>
-          ) : (
-            e.status === "ready" && <PriceTag low={e.price_low} high={e.price_high} />
+          {e.status === "sold" && e.sale_price != null && (
+            <span className="text-[#3F5E42] font-mono font-semibold text-sm">Sold £{e.sale_price}</span>
           )}
           <span className="text-xs font-mono text-[#8A7F63]">
             #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
@@ -263,6 +275,8 @@ function StockListRow({ item: e, onOpen }) {
           )}
         </div>
       </div>
+
+      <span className="text-[#8A7F63] text-lg shrink-0">›</span>
     </button>
   );
 }
