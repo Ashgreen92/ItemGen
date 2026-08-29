@@ -125,8 +125,34 @@ function CopyField({ label, value, charLimit }) {
   );
 }
 
+function ListedToggles({ item, onToggle }) {
+  const platforms = [
+    { field: "ebay_listed", label: "eBay" },
+    { field: "vinted_listed", label: "Vinted" },
+    { field: "depop_listed", label: "Depop" },
+  ];
+  return (
+    <div className="mb-5">
+      <span className="text-xs text-[#8A7F63] uppercase tracking-wide block mb-1.5">Listed on</span>
+      <div className="flex gap-2">
+        {platforms.map((p) => (
+          <button
+            key={p.field}
+            onClick={() => onToggle(item, p.field)}
+            className={`px-3 py-1.5 rounded-sm text-sm font-medium border transition ${
+              item[p.field]
+                ? "bg-[#3F5E42]/15 border-[#3F5E42]/40 text-[#3F5E42]"
+                : "bg-[#F7F3E8] border-[#C9BFA3] text-[#8A7F63]"
+            }`}
+          >
+            {item[p.field] ? "✓ " : ""}{p.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
 function ListingHelper({ item }) {
-  const [platform, setPlatform] = useState("ebay");
   const priceLabel =
     item.price_low === item.price_high || item.price_high == null
       ? `£${item.price_low ?? "—"}`
@@ -134,27 +160,9 @@ function ListingHelper({ item }) {
 
   return (
     <div className="mb-5">
-      <div className="flex bg-[#F7F3E8] rounded-sm p-0.5 border border-[#C9BFA3] mb-3 w-fit">
-        <button
-          onClick={() => setPlatform("ebay")}
-          className={`px-3 py-1.5 rounded-md text-sm font-medium transition ${platform === "ebay" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
-        >
-          eBay
-        </button>
-        <button
-          onClick={() => setPlatform("vinted")}
-          className={`px-3 py-1.5 rounded-md text-sm font-medium transition ${platform === "vinted" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
-        >
-          Vinted
-        </button>
-      </div>
-
       <div className="flex flex-col gap-2">
-        <CopyField label="Title" value={item.title} charLimit={platform === "ebay" ? 80 : 60} />
-        <CopyField
-          label={platform === "ebay" ? "Starting price (consider allowing offers up to the high end)" : "Price"}
-          value={platform === "ebay" ? priceLabel : `£${item.price_low ?? "—"}`}
-        />
+        <CopyField label="Title" value={item.title} charLimit={80} />
+        <CopyField label="Starting price (consider allowing offers up to the high end)" value={priceLabel} />
         <CopyField label="Category" value={item.category} />
         <CopyField label="Condition" value={item.condition} />
         <CopyField label="Description" value={item.description} />
@@ -410,6 +418,15 @@ export default function Home() {
     fetchItems();
   };
 
+  const togglePlatform = async (item, field) => {
+    const newVal = !item[field];
+    await supabase.from("items").update({ [field]: newVal }).eq("id", item.id);
+    const updated = { ...item, [field]: newVal };
+    setSelectedItem(updated);
+    setEditDraft((d) => (d ? { ...d, [field]: newVal } : d));
+    fetchItems();
+  };
+
   const removeItem = async (id) => {
     await supabase.from("items").delete().eq("id", id);
     fetchItems();
@@ -604,6 +621,11 @@ export default function Home() {
                             )}
                           </div>
                           <span className="text-xs font-mono text-[#8A7F63] block mt-1">#{stockNumber(e)}</span>
+                          {(e.ebay_listed || e.vinted_listed || e.depop_listed) && (
+                            <span className="text-xs text-[#3F5E42] block mt-0.5">
+                              {[e.ebay_listed && "eBay", e.vinted_listed && "Vinted", e.depop_listed && "Depop"].filter(Boolean).join(" · ")}
+                            </span>
+                          )}
                         </div>
                       </button>
                     ))}
@@ -731,6 +753,8 @@ export default function Home() {
             {selectedItem.status === "ready" && editDraft && (
               <>
                 <ListingHelper item={selectedItem} />
+
+                <ListedToggles item={selectedItem} onToggle={togglePlatform} />
 
                 {!editing ? (
                   <button
