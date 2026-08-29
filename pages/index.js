@@ -324,7 +324,9 @@ function DownloadablePhotos({ item, saveDirHandle, onChooseFolder }) {
   const titleSlug = (item.title || "item").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [heroIndex, setHeroIndex] = useState(0);
   const supportsFolderSave = typeof window !== "undefined" && "showDirectoryPicker" in window;
+  const photos = item.photos || [];
 
   const dataUrlToBlob = (dataUrl) => fetch(dataUrl).then((r) => r.blob());
 
@@ -384,18 +386,45 @@ function DownloadablePhotos({ item, saveDirHandle, onChooseFolder }) {
         <span className="text-xs font-mono text-[#A9822E]/80">Stock #{sku}</span>
       </div>
 
-      {(item.photos || []).length > 0 && (
-        <img
-          src={item.photos[0]}
-          alt=""
-          className="w-full aspect-square rounded-sm object-cover border border-[#C9BFA3] mb-2"
-        />
+      {photos.length > 0 && (
+        <div className="relative w-full aspect-square rounded-sm border border-[#C9BFA3] mb-2 overflow-hidden">
+          <img src={photos[heroIndex]} alt="" className="w-full h-full object-cover" />
+          {photos.length > 1 && (
+            <>
+              <button
+                onClick={() => setHeroIndex((i) => (i - 1 + photos.length) % photos.length)}
+                className="absolute left-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center text-lg"
+              >
+                ‹
+              </button>
+              <button
+                onClick={() => setHeroIndex((i) => (i + 1) % photos.length)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center text-lg"
+              >
+                ›
+              </button>
+              <div className="absolute bottom-2 left-0 right-0 flex justify-center gap-1.5">
+                {photos.map((_, i) => (
+                  <span key={i} className={`w-2 h-2 rounded-full ${i === heroIndex ? "bg-white" : "bg-white/40"}`} />
+                ))}
+              </div>
+            </>
+          )}
+        </div>
       )}
 
-      {(item.photos || []).length > 1 && (
+      {photos.length > 1 && (
         <div className="flex gap-2 overflow-x-auto pb-2">
-          {item.photos.slice(1).map((p, i) => (
-            <img key={i} src={p} alt="" className="w-16 h-16 rounded-sm object-cover border border-[#C9BFA3] shrink-0" />
+          {photos.map((p, i) => (
+            <img
+              key={i}
+              src={p}
+              alt=""
+              onClick={() => setHeroIndex(i)}
+              className={`w-16 h-16 rounded-sm object-cover border shrink-0 cursor-pointer ${
+                i === heroIndex ? "border-[#A9822E] border-2" : "border-[#C9BFA3]"
+              }`}
+            />
           ))}
         </div>
       )}
