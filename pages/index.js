@@ -213,6 +213,89 @@ function ListedToggles({ item, onToggle }) {
     </div>
   );
 }
+function StockCard({ item: e, onOpen }) {
+  const [photoIndex, setPhotoIndex] = useState(0);
+  const photos = e.photos?.length ? e.photos : e.thumbnail ? [e.thumbnail] : [];
+  const isListed = e.ebay_listed || e.vinted_listed || e.depop_listed;
+
+  const nextPhoto = (evt) => {
+    evt.stopPropagation();
+    setPhotoIndex((i) => (i + 1) % photos.length);
+  };
+  const prevPhoto = (evt) => {
+    evt.stopPropagation();
+    setPhotoIndex((i) => (i - 1 + photos.length) % photos.length);
+  };
+
+  return (
+    <div
+      onClick={() => onOpen(e)}
+      className={`text-left rounded overflow-hidden active:scale-[0.99] transition border cursor-pointer ${
+        isListed ? "bg-[#3F5E42]/10 border-[#3F5E42]/50" : "bg-[#F7F3E8] border-[#C9BFA3]"
+      }`}
+    >
+      <div className="aspect-square bg-[#DCD4BC] relative overflow-hidden">
+        {photos[photoIndex] && <img src={photos[photoIndex]} alt="" className="w-full h-full object-cover" />}
+
+        {photos.length > 1 && (
+          <>
+            <button
+              onClick={prevPhoto}
+              className="absolute left-1 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center text-sm"
+            >
+              ‹
+            </button>
+            <button
+              onClick={nextPhoto}
+              className="absolute right-1 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center text-sm"
+            >
+              ›
+            </button>
+            <div className="absolute bottom-1.5 left-0 right-0 flex justify-center gap-1">
+              {photos.map((_, i) => (
+                <span
+                  key={i}
+                  className={`w-1.5 h-1.5 rounded-full ${i === photoIndex ? "bg-white" : "bg-white/40"}`}
+                />
+              ))}
+            </div>
+          </>
+        )}
+
+        {e.status === "sold" && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <span
+              className="text-[#A63A2E] border-4 border-[#A63A2E] px-3 py-1 -rotate-12 font-mono font-bold text-lg tracking-[0.2em] uppercase opacity-80"
+              style={{ mixBlendMode: "multiply" }}
+            >
+              Sold
+            </span>
+          </div>
+        )}
+      </div>
+      <div className="p-3">
+        <div className="font-medium text-sm truncate">{e.title}</div>
+        <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+          <StatusBadge status={e.status} />
+          {e.status === "sold" && e.sale_price != null ? (
+            <span className="text-[#3F5E42] font-mono font-semibold text-sm">Sold £{e.sale_price}</span>
+          ) : (
+            e.status === "ready" && <PriceTag low={e.price_low} high={e.price_high} />
+          )}
+        </div>
+        <span className="text-xs font-mono text-[#8A7F63] block mt-1">
+          #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
+        </span>
+        {isListed && (
+          <span className="text-sm font-bold text-[#3F5E42] block mt-1">
+            ✓ {[e.ebay_listed && "eBay", e.vinted_listed && "Vinted", e.depop_listed && "Depop"].filter(Boolean).join(" · ")}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ListingHelper({ item }) {
   const priceLabel =
     item.price_low === item.price_high || item.price_high == null
@@ -833,53 +916,9 @@ export default function Home() {
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {filteredItems.map((e) => {
-                      const isListed = e.ebay_listed || e.vinted_listed || e.depop_listed;
-                      return (
-                      <button
-                        key={e.id}
-                        onClick={() => openItem(e)}
-                        className={`text-left rounded overflow-hidden active:scale-[0.99] transition border ${
-                          isListed ? "bg-[#3F5E42]/10 border-[#3F5E42]/50" : "bg-[#F7F3E8] border-[#C9BFA3]"
-                        }`}
-                      >
-                        <div className="aspect-square bg-[#DCD4BC] relative overflow-hidden">
-                          {(e.photos?.[0] || e.thumbnail) && (
-                            <img src={e.photos?.[0] || e.thumbnail} alt="" className="w-full h-full object-cover" />
-                          )}
-                          {e.status === "sold" && (
-                            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                              <span
-                                className="text-[#A63A2E] border-4 border-[#A63A2E] px-3 py-1 -rotate-12 font-mono font-bold text-lg tracking-[0.2em] uppercase opacity-80"
-                                style={{ mixBlendMode: "multiply" }}
-                              >
-                                Sold
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                        <div className="p-3">
-                          <div className="font-medium text-sm truncate">{e.title}</div>
-                          <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                            <StatusBadge status={e.status} />
-                            {e.status === "sold" && e.sale_price != null ? (
-                              <span className="text-[#3F5E42] font-mono font-semibold text-sm">Sold £{e.sale_price}</span>
-                            ) : (
-                              e.status === "ready" && <PriceTag low={e.price_low} high={e.price_high} />
-                            )}
-                          </div>
-                          <span className="text-xs font-mono text-[#8A7F63] block mt-1">
-                            #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
-                          </span>
-                          {(e.ebay_listed || e.vinted_listed || e.depop_listed) && (
-                            <span className="text-sm font-bold text-[#3F5E42] block mt-1">
-                              ✓ {[e.ebay_listed && "eBay", e.vinted_listed && "Vinted", e.depop_listed && "Depop"].filter(Boolean).join(" · ")}
-                            </span>
-                          )}
-                        </div>
-                      </button>
-                      );
-                    })}
+                    {filteredItems.map((e) => (
+                      <StockCard key={e.id} item={e} onOpen={openItem} />
+                    ))}
                   </div>
                 )}
               </>
