@@ -300,11 +300,22 @@ function DownloadablePhotos({ item, saveDirHandle, onChooseFolder }) {
         <span className="text-xs text-[#8A7F63]">Photos</span>
         <span className="text-xs font-mono text-[#A9822E]/80">Stock #{sku}</span>
       </div>
-      <div className="flex gap-2 overflow-x-auto pb-2">
-        {(item.photos || []).map((p, i) => (
-          <img key={i} src={p} alt="" className="w-24 h-24 rounded-sm object-cover border border-[#C9BFA3] shrink-0" />
-        ))}
-      </div>
+
+      {(item.photos || []).length > 0 && (
+        <img
+          src={item.photos[0]}
+          alt=""
+          className="w-full aspect-square rounded-sm object-cover border border-[#C9BFA3] mb-2"
+        />
+      )}
+
+      {(item.photos || []).length > 1 && (
+        <div className="flex gap-2 overflow-x-auto pb-2">
+          {item.photos.slice(1).map((p, i) => (
+            <img key={i} src={p} alt="" className="w-16 h-16 rounded-sm object-cover border border-[#C9BFA3] shrink-0" />
+          ))}
+        </div>
+      )}
 
       {supportsFolderSave ? (
         !saveDirHandle ? (
@@ -822,11 +833,15 @@ export default function Home() {
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {filteredItems.map((e) => (
+                    {filteredItems.map((e) => {
+                      const isListed = e.ebay_listed || e.vinted_listed || e.depop_listed;
+                      return (
                       <button
                         key={e.id}
                         onClick={() => openItem(e)}
-                        className="text-left bg-[#F7F3E8] border border-[#C9BFA3] rounded overflow-hidden active:scale-[0.99] transition"
+                        className={`text-left rounded overflow-hidden active:scale-[0.99] transition border ${
+                          isListed ? "bg-[#3F5E42]/10 border-[#3F5E42]/50" : "bg-[#F7F3E8] border-[#C9BFA3]"
+                        }`}
                       >
                         <div className="aspect-square bg-[#DCD4BC] relative overflow-hidden">
                           {(e.photos?.[0] || e.thumbnail) && (
@@ -857,13 +872,14 @@ export default function Home() {
                             #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
                           </span>
                           {(e.ebay_listed || e.vinted_listed || e.depop_listed) && (
-                            <span className="text-xs text-[#3F5E42] block mt-0.5">
-                              {[e.ebay_listed && "eBay", e.vinted_listed && "Vinted", e.depop_listed && "Depop"].filter(Boolean).join(" · ")}
+                            <span className="text-sm font-bold text-[#3F5E42] block mt-1">
+                              ✓ {[e.ebay_listed && "eBay", e.vinted_listed && "Vinted", e.depop_listed && "Depop"].filter(Boolean).join(" · ")}
                             </span>
                           )}
                         </div>
                       </button>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </>
