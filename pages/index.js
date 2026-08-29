@@ -79,8 +79,8 @@ async function ensureUnderSizeLimit(photos, maxTotalBytes = 3200000) {
   return current;
 }
 
-async function analyzeItem(photos) {
-  const bodyStr = JSON.stringify({ photos });
+async function analyzeItem(photos, mode, confirmedSize) {
+  const bodyStr = JSON.stringify({ photos, mode, confirmedSize });
   const res = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -114,6 +114,7 @@ function SunflowerIcon({ size = 16, className = "" }) {
 function StatusBadge({ status }) {
   const map = {
     processing: { label: "Processing", cls: "bg-[#A9822E]/15 text-[#A9822E] border-[#A9822E]/30" },
+    needs_size: { label: "Needs size", cls: "bg-[#A63A2E]/15 text-[#A63A2E] border-[#A63A2E]/30" },
     ready: { label: "Ready", cls: "bg-[#3F5E42]/15 text-[#3F5E42] border-[#3F5E42]/30" },
     error: { label: "Failed", cls: "bg-[#A63A2E]/15 text-[#A63A2E] border-[#A63A2E]/30" },
     sold: { label: "Sold", cls: "bg-[#8A7F63]/15 text-[#6B6250] border-[#8A7F63]/30" },
@@ -583,10 +584,10 @@ export default function Home() {
     }
   };
 
-  const processItem = useCallback(async (id, photos) => {
+  const runFullGeneration = useCallback(async (id, photos, confirmedSize) => {
     try {
       const safePhotos = await ensureUnderSizeLimit(photos);
-      const result = await analyzeItem(safePhotos);
+      const result = await analyzeItem(safePhotos, "full", confirmedSize || null);
       await supabase
         .from("items")
         .update({
@@ -600,8 +601,6 @@ export default function Home() {
           confidence: result.confidence || "medium",
           notes: result.notes || "",
           verify_before_listing: Array.isArray(result.verify_before_listing) ? result.verify_before_listing : [],
-          size: result.size || null,
-          size_applicable: result.size_applicable === true,
           status: "ready",
         })
         .eq("id", id);
@@ -610,6 +609,31 @@ export default function Home() {
       await supabase.from("items").update({ status: "error", error_detail: err.message || String(err) }).eq("id", id);
     }
     fetchItems();
+  }, [fetchItems]);
+
+  const processItem = useCallback(async (id, photos) => {
+    try {
+      const safePhotos = await ensureUnderSizeLimit(photos);
+      const quick = await analyzeItem(safePhotos, "quick");
+      const sizeApplicable = quick.size_applicable === true;
+      const size = quick.size || null;
+
+      if (sizeApplicable && !size) {
+        // Stop here - can't write an accurate listing without knowing the size.
+        // The item page will show a required prompt; runFullGeneration only
+        // fires once the user answers it (see confirmSizeGate).
+        await supabase.from("items").update({ status: "needs_size", size_applicable: true, size: null }).eq("id", id);
+        fetchItems();
+        return;
+      }
+
+      await supabase.from("items").update({ size_applicable: sizeApplicable, size }).eq("id", id);
+      await runFullGeneration(id, photos, sizeApplicable ? size : null);
+    } catch (err) {
+      console.error(err);
+      await supabase.from("items").update({ status: "error", error_detail: err.message || String(err) }).eq("id", id);
+      fetchItems();
+    }
   }, [fetchItems]);
 
   const handleNextItem = async () => {
@@ -678,11 +702,12 @@ export default function Home() {
 
   const confirmSizeGate = async (withValue) => {
     const size = withValue ? sizeGateInput.trim() : "Not specified";
-    await supabase.from("items").update({ size }).eq("id", selectedItem.id);
-    setSelectedItem((s) => ({ ...s, size }));
-    setEditDraft((d) => (d ? { ...d, size } : d));
+    const item = selectedItem;
+    await supabase.from("items").update({ size, status: "processing" }).eq("id", item.id);
+    setSelectedItem((s) => ({ ...s, size, status: "processing" }));
     setSizeGateInput("");
     fetchItems();
+    runFullGeneration(item.id, item.photos, size === "Not specified" ? null : size);
   };
 
   const [soldFormFor, setSoldFormFor] = useState(null);
@@ -1087,11 +1112,11 @@ export default function Home() {
               </div>
             )}
 
-            {selectedItem.status === "ready" && editDraft && selectedItem.size_applicable && !selectedItem.size && (
+            {selectedItem.status === "needs_size" && (
               <div className="bg-[#A9822E]/10 border border-[#A9822E]/40 rounded-sm p-4 mb-4">
                 <p className="font-serif text-lg mb-1">What size is this?</p>
                 <p className="text-xs text-[#8A7F63] mb-3">
-                  The AI couldn't read a size from the photos. Enter it to unlock the rest of the listing.
+                  The AI couldn't read a size from the photos, and can't write an accurate listing without it. Enter it to continue.
                 </p>
                 <input
                   value={sizeGateInput}
@@ -1118,9 +1143,7 @@ export default function Home() {
               </div>
             )}
 
-            {selectedItem.status === "ready" &&
-              editDraft &&
-              !(selectedItem.size_applicable && !selectedItem.size) && (
+            {selectedItem.status === "ready" && editDraft && (
               <>
                 <ListingHelper item={selectedItem} />
 
