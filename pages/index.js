@@ -201,30 +201,110 @@ function stockNumber(item) {
   return item?.id ? item.id.split("-")[0].toUpperCase() : "--------";
 }
 
-function DownloadablePhotos({ item }) {
+function DownloadablePhotos({ item, saveDirHandle, onChooseFolder }) {
   const sku = stockNumber(item);
   const titleSlug = (item.title || "item").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+  const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const supportsFolderSave = typeof window !== "undefined" && "showDirectoryPicker" in window;
+
+  const dataUrlToBlob = (dataUrl) => fetch(dataUrl).then((r) => r.blob());
+
+  const saveToFolder = async () => {
+    if (!saveDirHandle) return;
+    setBusy(true);
+    setSaved(false);
+    try {
+      const subDir = await saveDirHandle.getDirectoryHandle(`${titleSlug}-${sku}`, { create: true });
+      for (let i = 0; i < (item.photos || []).length; i++) {
+        const blob = await dataUrlToBlob(item.photos[i]);
+        const fileHandle = await subDir.getFileHandle(`${titleSlug}-${i + 1}.jpg`, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      }
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (err) {
+      console.error("Save to folder failed:", err);
+      alert("Couldn't save photos to that folder: " + (err.message || err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const downloadZip = async () => {
+    setBusy(true);
+    try {
+      const JSZip = (await import("jszip")).default;
+      const zip = new JSZip();
+      (item.photos || []).forEach((dataUrl, i) => {
+        const base64 = dataUrl.split(",")[1];
+        zip.file(`${titleSlug}-${i + 1}.jpg`, base64, { base64: true });
+      });
+      const blob = await zip.generateAsync({ type: "blob" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${titleSlug}-${sku}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Zip download failed:", err);
+      alert("Couldn't build the zip file: " + (err.message || err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="mb-4">
       <div className="flex items-center justify-between mb-2">
-        <span className="text-xs text-[#8A7F63]">Photos — tap to download</span>
+        <span className="text-xs text-[#8A7F63]">Photos</span>
         <span className="text-xs font-mono text-[#A9822E]/80">Stock #{sku}</span>
       </div>
-      <div className="flex gap-2 overflow-x-auto pb-1">
+      <div className="flex gap-2 overflow-x-auto pb-2">
         {(item.photos || []).map((p, i) => (
-          <a
-            key={i}
-            href={p}
-            download={`Item-Gen Pictures/${titleSlug}-${sku}/${titleSlug}-${i + 1}.jpg`}
-            className="relative shrink-0"
-          >
-            <img src={p} alt="" className="w-24 h-24 rounded-sm object-cover border border-[#C9BFA3]" />
-            <div className="absolute bottom-1 right-1 bg-[#EDE6D6]/80 rounded-md p-1">
-              <Download size={12} />
-            </div>
-          </a>
+          <img key={i} src={p} alt="" className="w-24 h-24 rounded-sm object-cover border border-[#C9BFA3] shrink-0" />
         ))}
       </div>
+
+      {supportsFolderSave ? (
+        !saveDirHandle ? (
+          <button
+            onClick={onChooseFolder}
+            className="w-full mt-2 py-2.5 rounded bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-medium flex items-center justify-center gap-2"
+          >
+            <Download size={15} />
+            Choose download folder (one-time)
+          </button>
+        ) : (
+          <button
+            onClick={saveToFolder}
+            disabled={busy || !(item.photos || []).length}
+            className={`w-full mt-2 py-2.5 rounded border font-medium flex items-center justify-center gap-2 disabled:opacity-50 ${
+              saved ? "bg-[#3F5E42]/15 border-[#3F5E42]/40 text-[#3F5E42]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#2B2620]"
+            }`}
+          >
+            {busy ? <Loader2 size={15} className="animate-spin" /> : saved ? <Check size={15} /> : <Download size={15} />}
+            {busy ? "Saving…" : saved ? "Saved to folder" : `Save ${item.photos?.length || 0} photos to folder`}
+          </button>
+        )
+      ) : (
+        <button
+          onClick={downloadZip}
+          disabled={busy || !(item.photos || []).length}
+          className="w-full mt-2 py-2.5 rounded bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+        >
+          {busy ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+          {busy ? "Building zip…" : `Download all ${item.photos?.length || 0} photos (.zip)`}
+        </button>
+      )}
+      {!supportsFolderSave && (
+        <p className="text-xs text-[#8A7F63] mt-1">This browser can't save straight to a folder — using a zip file instead.</p>
+      )}
     </div>
   );
 }
@@ -287,6 +367,16 @@ export default function Home() {
   const [batchFilter, setBatchFilter] = useState("all");
   const [capturing, setCapturing] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
+  const [saveDirHandle, setSaveDirHandle] = useState(null);
+
+  const chooseSaveFolder = async () => {
+    try {
+      const handle = await window.showDirectoryPicker();
+      setSaveDirHandle(handle);
+    } catch (err) {
+      if (err.name !== "AbortError") console.error("Folder pick failed:", err);
+    }
+  };
   const [editDraft, setEditDraft] = useState(null);
   const [editing, setEditing] = useState(false);
   const pollRef = useRef(null);
@@ -742,7 +832,7 @@ export default function Home() {
           </div>
 
           <div className="flex-1 overflow-y-auto p-4 sm:p-8 max-w-2xl w-full mx-auto">
-            <DownloadablePhotos item={selectedItem} />
+            <DownloadablePhotos item={selectedItem} saveDirHandle={saveDirHandle} onChooseFolder={chooseSaveFolder} />
 
             <div className="mb-3">
               <StatusBadge status={selectedItem.status} />
