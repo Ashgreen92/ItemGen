@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Camera, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download } from "lucide-react";
+import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
 const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra"];
@@ -639,21 +639,39 @@ export default function Home() {
             ))}
           </div>
 
-          <div
-            className={`relative w-full py-4 rounded bg-[#F7F3E8] border border-[#C9BFA3] flex items-center justify-center gap-2 font-medium text-[#2B2620] mb-3 ${
-              currentPhotos.length >= 5 || capturing ? "opacity-40" : ""
-            }`}
-          >
-            {capturing ? <Loader2 size={18} className="animate-spin" /> : <Camera size={18} />}
-            {currentPhotos.length >= 5 ? "All 5 photos captured" : "Take photo"}
-            <input
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={handleAddPhoto}
-              disabled={currentPhotos.length >= 5 || capturing}
-              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
-            />
+          <div className="grid grid-cols-2 gap-2 mb-3">
+            <div
+              className={`relative py-4 rounded bg-[#F7F3E8] border border-[#C9BFA3] flex items-center justify-center gap-2 font-medium text-[#2B2620] ${
+                currentPhotos.length >= 5 || capturing ? "opacity-40" : ""
+              }`}
+            >
+              {capturing ? <Loader2 size={18} className="animate-spin" /> : <Camera size={18} />}
+              {currentPhotos.length >= 5 ? "Full" : "Take photo"}
+              <input
+                type="file"
+                accept="image/*"
+                capture="environment"
+                onChange={handleAddPhoto}
+                disabled={currentPhotos.length >= 5 || capturing}
+                style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
+              />
+            </div>
+
+            <div
+              className={`relative py-4 rounded bg-[#F7F3E8] border border-[#C9BFA3] flex items-center justify-center gap-2 font-medium text-[#2B2620] ${
+                currentPhotos.length >= 5 || capturing ? "opacity-40" : ""
+              }`}
+            >
+              <ImageIcon size={18} />
+              {currentPhotos.length >= 5 ? "Full" : "From gallery"}
+              <input
+                type="file"
+                accept="image/*"
+                onChange={handleAddPhoto}
+                disabled={currentPhotos.length >= 5 || capturing}
+                style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
+              />
+            </div>
           </div>
 
           <button
