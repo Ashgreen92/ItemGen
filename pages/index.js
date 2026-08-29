@@ -79,8 +79,8 @@ async function ensureUnderSizeLimit(photos, maxTotalBytes = 3200000) {
   return current;
 }
 
-async function analyzeItem(photos) {
-  const bodyStr = JSON.stringify({ photos });
+async function analyzeItem(photos, knownSize, knownDetails) {
+  const bodyStr = JSON.stringify({ photos, knownSize, knownDetails });
   const res = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -522,6 +522,8 @@ export default function Home() {
   const [loadedItems, setLoadedItems] = useState(false);
   const [currentPhotos, setCurrentPhotos] = useState([]);
   const [currentBatch, setCurrentBatch] = useState("");
+  const [currentSize, setCurrentSize] = useState("");
+  const [currentKnownDetails, setCurrentKnownDetails] = useState("");
   const [batchFilter, setBatchFilter] = useState("all");
   const [capturing, setCapturing] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
@@ -582,10 +584,10 @@ export default function Home() {
     }
   };
 
-  const processItem = useCallback(async (id, photos) => {
+  const processItem = useCallback(async (id, photos, knownSize, knownDetails) => {
     try {
       const safePhotos = await ensureUnderSizeLimit(photos);
-      const result = await analyzeItem(safePhotos);
+      const result = await analyzeItem(safePhotos, knownSize, knownDetails);
       await supabase
         .from("items")
         .update({
@@ -613,6 +615,8 @@ export default function Home() {
     if (currentPhotos.length === 0) return;
     try {
       const thumbnail = await resizeDataUrl(currentPhotos[0], 600, 0.65).catch(() => currentPhotos[0]);
+      const knownSize = currentSize.trim();
+      const knownDetails = currentKnownDetails.trim();
       const { data, error } = await supabase
         .from("items")
         .insert({
@@ -621,14 +625,18 @@ export default function Home() {
           photos: currentPhotos,
           thumbnail,
           batch: currentBatch.trim() || null,
+          known_size: knownSize || null,
+          known_details: knownDetails || null,
         })
         .select()
         .single();
 
       if (error) throw error;
       setCurrentPhotos([]);
+      setCurrentSize("");
+      setCurrentKnownDetails("");
       fetchItems();
-      processItem(data.id, currentPhotos);
+      processItem(data.id, currentPhotos, knownSize, knownDetails);
     } catch (err) {
       console.error("handleNextItem failed:", err);
       alert("Next item failed: " + (err.message || JSON.stringify(err)));
@@ -667,7 +675,7 @@ export default function Home() {
     await supabase.from("items").update({ status: "processing" }).eq("id", item.id);
     setSelectedItem({ ...item, status: "processing" });
     fetchItems();
-    processItem(item.id, item.photos);
+    processItem(item.id, item.photos, item.known_size, item.known_details);
   };
 
   const [soldFormFor, setSoldFormFor] = useState(null);
@@ -765,6 +773,26 @@ export default function Home() {
                 Every item you capture will be tagged "{currentBatch}" until you change or clear this.
               </p>
             )}
+          </div>
+
+          <div className="mb-4 bg-[#3F5E42]/8 border border-[#3F5E42]/30 rounded-sm p-3">
+            <p className="text-xs font-semibold text-[#3F5E42] uppercase tracking-wide mb-2">
+              Know something the camera can't see? Tell it here — the AI can't reliably read sizes or fine print, but you can
+            </p>
+            <label className="text-xs text-[#8A7F63] mb-1 block">Size (if you know it)</label>
+            <input
+              value={currentSize}
+              onChange={(e) => setCurrentSize(e.target.value)}
+              placeholder="e.g. UK 10, Men's L, EU 42"
+              className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm mb-2"
+            />
+            <label className="text-xs text-[#8A7F63] mb-1 block">Other known details (material, flaws, brand, etc.)</label>
+            <input
+              value={currentKnownDetails}
+              onChange={(e) => setCurrentKnownDetails(e.target.value)}
+              placeholder="e.g. 100% wool, small mark on cuff"
+              className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
+            />
           </div>
 
           <p className="text-[#6B6250] text-sm mb-4">
