@@ -1,27 +1,39 @@
-const PROMPT = `You are helping a UK reseller create a marketplace listing from photos of a single secondhand item. The photos follow this order where present: front, then back, then a label/tag close-up, then a condition/flaw detail, then an extra shot. The label/tag close-up, if present, is deliberately a close-up of any label or tag — treat it as your primary source for size, material, and model information; read it carefully rather than guessing from the garment's general appearance.
+const QUICK_PROMPT = `Look at these photos of a single secondhand item. Answer ONLY with a JSON object, no markdown fences, no commentary:
 
-Step 1: Identify only what you can directly observe. Visible brand logos, colours, and anything legible on a tag or printed on the item itself count as observed. An exact product line name, precise size, material composition, or model number does NOT count as observed unless you can actually read it on a visible label/tag in the photos — do not fill these in from a guess at what "looks like" a typical product of that brand. If you cannot read a size or material tag, that is unknown, not a fact to assume.
+{
+  "size_applicable": true or false. True only if this is clothing or footwear where a size is a normal, expected listing detail. False for anything else (electronics, homeware, toys, accessories, etc.),
+  "size": "the exact size if you can read it on a visible label/tag in the photos, else null. Only fill this in if actually legible - never guess."
+}`;
 
-Step 2: Use web search to look up the item on eBay UK and/or Vinted to see what comparable items (same or similar brand/model/condition) are actually selling for right now. Prioritize sold/completed listings over active asking prices — active listings on both platforms are consistently priced above what items actually sell for, since sellers list high and negotiate down or wait for offers. If you can only find active asking prices, treat those as a ceiling, not a target: price the item toward the lower third of that range rather than the middle or top. Do not guess the price from memory — base it on what you find in search, and err conservative rather than optimistic.
+function buildFullPrompt(confirmedSize) {
+  let sizeNote = "";
+  if (confirmedSize) {
+    sizeNote = `\n\nThe seller has confirmed the size is: "${confirmedSize}". Treat this as verified fact - state it plainly in the description, do not second-guess it, and do not list it in verify_before_listing.`;
+  }
+
+  return `You are helping a UK reseller create a marketplace listing from photos of a single secondhand item. The photos follow this order where present: front, then back, then a label/tag close-up, then a condition/flaw detail, then an extra shot. The label/tag close-up, if present, is deliberately a close-up of any label or tag — treat it as your primary source for material and model information; read it carefully rather than guessing from the garment's general appearance.
+
+Step 1: Identify only what you can directly observe. Visible brand logos, colours, and anything legible on a tag or printed on the item itself count as observed. An exact product line name, material composition, or model number does NOT count as observed unless you can actually read it on a visible label/tag in the photos — do not fill these in from a guess at what "looks like" a typical product of that brand.${sizeNote}
+
+Step 2: You have exactly ONE web search available - use it wisely. Search eBay UK and/or Vinted for comparable items (same or similar brand/model/condition) to see what they're actually selling for right now. Prioritize sold/completed listings over active asking prices — active listings on both platforms are consistently priced above what items actually sell for, since sellers list high and negotiate down or wait for offers. If your search only turns up active asking prices, treat those as a ceiling, not a target: price the item toward the lower third of that range rather than the middle or top. Do not guess the price from memory — base it on what you find in search, and err conservative rather than optimistic.
 
 Step 3: Respond with ONLY a JSON object as your final message, no markdown fences, no commentary before or after it, in exactly this shape:
 
 {
-  "title": "short punchy resale title, under 80 characters. Only state details you actually observed per Step 1 — if you're not sure of the exact product line/model, use a generic accurate description instead (e.g. 'Men's Navy T-Shirt' not a specific product line you can't confirm)",
-  "description": "2-4 sentence listing description containing ONLY visually confirmed facts and any visible wear/flaws. Write it the way a person selling the item would write it - state facts plainly (e.g. 'Size 18½. Polyester-cotton blend.') Never narrate how you know something (no phrases like 'tag confirms', 'as shown in photos', 'visible in the images', 'label indicates') - that reads as an AI wrote it, not a seller",
+  "title": "short punchy resale title, under 80 characters. Only state details you actually observed per Step 1${confirmedSize ? " (the confirmed size may be included)" : ""} — if you're not sure of the exact product line/model, use a generic accurate description instead (e.g. 'Men's Navy T-Shirt' not a specific product line you can't confirm)",
+  "description": "2-4 sentence listing description containing ONLY visually confirmed facts${confirmedSize ? " plus the confirmed size" : ""} and any visible wear/flaws. Write it the way a person selling the item would write it - state facts plainly (e.g. 'Size 18½. Polyester-cotton blend.') Never narrate how you know something (no phrases like 'tag confirms', 'as shown in photos', 'visible in the images', 'label indicates', 'seller confirmed') - that reads as an AI wrote it, not a seller",
   "category": "best-fit resale category, e.g. Men's Trainers, Vintage Coats, Kids Toys",
   "condition": "one of: New with tags, New without tags, Excellent, Good, Fair, Well worn",
   "brand": "brand name if visible, else empty string",
-  "size_applicable": true or false. True only if this item is clothing or footwear where a size is a normal, expected listing detail. False for anything else (electronics, homeware, toys, accessories without sizing, etc.),
-  "size": "the exact size if you can read it on a visible label/tag, else null. Only relevant when size_applicable is true",
   "estimated_price_low": number (GBP, no symbol, based on real comparable listings you found),
   "estimated_price_high": number (GBP, no symbol, based on real comparable listings you found),
   "confidence": "high, medium, or low - your confidence in the identification AND the price data",
-  "verify_before_listing": ["a list of specific things the seller should personally check before publishing because they were NOT confirmable from the photos - e.g. 'Fabric composition - no care tag visible'. Do not include size here if size_applicable is true - that's handled separately. Leave as an empty array only if everything material was genuinely visible and confirmed."],
+  "verify_before_listing": ["a list of specific things the seller should personally check before publishing because they were NOT confirmable from the photos - e.g. 'Fabric composition - no care tag visible'. Leave as an empty array only if everything material was genuinely visible and confirmed."],
   "notes": "state what you searched for and what comparable listings/prices you actually found. If you could not find good comparables, say so plainly and set confidence to low."
 }
 
-Never invent a price, size, material, or product line. Anything you didn't actually see clearly goes in verify_before_listing, not into the title or description as stated fact.`;
+Never invent a price, material, or product line. Anything you didn't actually see clearly goes in verify_before_listing, not into the title or description as stated fact.`;
+}
 
 export const config = {
   api: {
@@ -30,6 +42,15 @@ export const config = {
     },
   },
 };
+
+function extractJson(text) {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1) {
+    throw new Error(`No JSON found in AI response. Got: "${text.slice(0, 200) || "(empty response)"}"`);
+  }
+  return JSON.parse(text.slice(start, end + 1));
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -41,9 +62,12 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Server is missing ANTHROPIC_API_KEY" });
   }
 
-  const { photos } = req.body || {};
+  const { photos, mode, confirmedSize } = req.body || {};
   if (!Array.isArray(photos) || photos.length === 0) {
     return res.status(400).json({ error: "No photos provided" });
+  }
+  if (mode !== "quick" && mode !== "full") {
+    return res.status(400).json({ error: "mode must be 'quick' or 'full'" });
   }
 
   try {
@@ -56,6 +80,23 @@ export default async function handler(req, res) {
       },
     }));
 
+    const isQuick = mode === "quick";
+    const promptText = isQuick ? QUICK_PROMPT : buildFullPrompt(confirmedSize);
+
+    const body = {
+      model: "claude-sonnet-5",
+      max_tokens: isQuick ? 300 : 2500,
+      messages: [
+        {
+          role: "user",
+          content: [...imageBlocks, { type: "text", text: promptText }],
+        },
+      ],
+    };
+    if (!isQuick) {
+      body.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 1 }];
+    }
+
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -63,17 +104,7 @@ export default async function handler(req, res) {
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify({
-        model: "claude-sonnet-5",
-        max_tokens: 2500,
-        messages: [
-          {
-            role: "user",
-            content: [...imageBlocks, { type: "text", text: PROMPT }],
-          },
-        ],
-        tools: [{ type: "web_search_20250305", name: "web_search" }],
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
@@ -88,21 +119,12 @@ export default async function handler(req, res) {
       .join("\n")
       .trim();
 
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
-    if (start === -1 || end === -1) {
-      console.error("No JSON in response. Raw text:", text);
-      const snippet = text.slice(0, 200) || "(empty response)";
-      return res.status(502).json({ error: `No JSON found in AI response. Got: "${snippet}"` });
-    }
-
     let result;
     try {
-      result = JSON.parse(text.slice(start, end + 1));
+      result = extractJson(text);
     } catch (parseErr) {
-      console.error("JSON parse failed. Raw text:", text);
-      const snippet = text.slice(0, 200);
-      return res.status(502).json({ error: `Couldn't parse AI response as JSON. Got: "${snippet}"` });
+      console.error("JSON extraction failed. Raw text:", text);
+      return res.status(502).json({ error: parseErr.message });
     }
     return res.status(200).json(result);
   } catch (err) {
