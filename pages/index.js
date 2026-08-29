@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Camera, X, Loader2, Trash2, Pencil, ChevronLeft, Package, Check, RefreshCw, AlertCircle, Tag, Lock, Copy, Download } from "lucide-react";
+import { Camera, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
 const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra"];
@@ -65,6 +65,17 @@ async function analyzeItem(photos) {
 
 // ---------- UI bits ----------
 
+function SunflowerIcon({ size = 16, className = "" }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" className={className}>
+      {Array.from({ length: 8 }).map((_, i) => (
+        <ellipse key={i} cx="12" cy="5.2" rx="2.1" ry="4.4" fill="currentColor" opacity="0.88" transform={`rotate(${i * 45} 12 12)`} />
+      ))}
+      <circle cx="12" cy="12" r="3.1" fill="#5C3A1E" />
+    </svg>
+  );
+}
+
 function StatusBadge({ status }) {
   const map = {
     processing: { label: "Processing", cls: "bg-[#A9822E]/15 text-[#A9822E] border-[#A9822E]/30" },
@@ -127,6 +138,11 @@ function CopyField({ label, value, charLimit }) {
   );
 }
 
+function fmtDate(iso) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+
 function ListedToggles({ item, onToggle }) {
   const platforms = [
     { field: "ebay_listed", label: "eBay" },
@@ -135,8 +151,13 @@ function ListedToggles({ item, onToggle }) {
   ];
   return (
     <div className="mb-5">
-      <span className="text-xs text-[#8A7F63] uppercase tracking-wide block mb-1.5">Listed on</span>
-      <div className="flex gap-2">
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-xs text-[#8A7F63] uppercase tracking-wide">Listed on</span>
+        {item.created_at && (
+          <span className="text-xs text-[#8A7F63]">Captured {fmtDate(item.created_at)}</span>
+        )}
+      </div>
+      <div className="flex gap-2 flex-wrap">
         {platforms.map((p) => (
           <button
             key={p.field}
@@ -148,6 +169,9 @@ function ListedToggles({ item, onToggle }) {
             }`}
           >
             {item[p.field] ? "✓ " : ""}{p.label}
+            {item[p.field] && item[`${p.field}_at`] && (
+              <span className="opacity-70"> · {fmtDate(item[`${p.field}_at`])}</span>
+            )}
           </button>
         ))}
       </div>
@@ -191,7 +215,7 @@ function DownloadablePhotos({ item }) {
           <a
             key={i}
             href={p}
-            download={`ItemGen/${sku}/${sku}-${titleSlug}-${i + 1}.jpg`}
+            download={`Item-Gen Pictures/${titleSlug}-${sku}/${titleSlug}-${i + 1}.jpg`}
             className="relative shrink-0"
           >
             <img src={p} alt="" className="w-24 h-24 rounded-sm object-cover border border-[#C9BFA3]" />
@@ -223,8 +247,8 @@ function PasscodeGate({ onUnlock }) {
     <div className="min-h-screen bg-[#EDE6D6] text-[#2B2620] flex items-center justify-center p-4">
       <form onSubmit={submit} className="w-full max-w-xs flex flex-col gap-3">
         <div className="flex items-center gap-2 justify-center mb-2">
-          <div className="w-8 h-8 rounded-md bg-[#A9822E] flex items-center justify-center">
-            <Lock size={16} className="text-[#2B2620]" />
+          <div className="w-8 h-8 flex items-center justify-center text-[#A9822E]">
+            <SunflowerIcon size={26} />
           </div>
           <span className="font-serif text-lg">ItemGen</span>
         </div>
@@ -426,10 +450,12 @@ export default function Home() {
 
   const togglePlatform = async (item, field) => {
     const newVal = !item[field];
-    await supabase.from("items").update({ [field]: newVal }).eq("id", item.id);
-    const updated = { ...item, [field]: newVal };
+    const dateField = `${field}_at`;
+    const newDate = newVal ? new Date().toISOString() : null;
+    await supabase.from("items").update({ [field]: newVal, [dateField]: newDate }).eq("id", item.id);
+    const updated = { ...item, [field]: newVal, [dateField]: newDate };
     setSelectedItem(updated);
-    setEditDraft((d) => (d ? { ...d, [field]: newVal } : d));
+    setEditDraft((d) => (d ? { ...d, [field]: newVal, [dateField]: newDate } : d));
     fetchItems();
   };
 
@@ -446,8 +472,8 @@ export default function Home() {
     <div className="min-h-screen bg-[#EDE6D6] text-[#2B2620] flex flex-col">
       <div className="border-b-4 border-double border-[#8A7F63] px-4 sm:px-8 py-3 flex items-center justify-between sticky top-0 bg-[#EDE6D6]/95 backdrop-blur z-10">
         <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 border-2 border-[#2B2620] flex items-center justify-center -rotate-3 bg-[#F7F3E8] shrink-0">
-            <span className="font-mono text-[10px] font-bold tracking-tighter">IG</span>
+          <div className="w-8 h-8 flex items-center justify-center shrink-0 text-[#A9822E]">
+            <SunflowerIcon size={28} />
           </div>
           <span className="font-serif text-xl tracking-tight">ItemGen</span>
         </div>
@@ -471,7 +497,7 @@ export default function Home() {
         <div className="flex-1 flex flex-col p-4 sm:p-8 max-w-xl w-full mx-auto">
           <div className="mb-4">
             <label className="text-xs text-[#8A7F63] uppercase tracking-wide mb-1 block">
-              Batch / lot (optional — e.g. "Box of jumpers")
+              Category / Folder (optional — e.g. "Jumpers")
             </label>
             <input
               list="batch-suggestions"
@@ -493,7 +519,7 @@ export default function Home() {
           </div>
 
           <p className="text-[#6B6250] text-sm mb-4">
-            Follow the prompts below for the best identification, then press <span className="text-[#2B2620] font-medium">Next item</span>. Photos 1–2 are the minimum; the label shot especially helps the AI identify the exact item instead of guessing.
+            For best results, try to capture: <span className="font-bold text-[#2B2620]">front · back · label or markings · close-up of any damage · one extra angle</span>. Photos are compressed automatically, so there's no downside to taking all 5. Then press <span className="text-[#2B2620] font-medium">Next item</span>.
           </p>
 
           <div className="grid grid-cols-5 gap-2 mb-1">
@@ -510,7 +536,7 @@ export default function Home() {
                     </button>
                   </>
                 ) : (
-                  <span className="text-[#A79B7C] text-[10px] text-center px-1 leading-tight">{label}</span>
+                  <Camera size={16} className="text-[#C9BFA3]" />
                 )}
               </div>
             ))}
@@ -529,7 +555,7 @@ export default function Home() {
             }`}
           >
             {capturing ? <Loader2 size={18} className="animate-spin" /> : <Camera size={18} />}
-            {currentPhotos.length >= 5 ? "All 5 photos captured" : `Take photo — ${SHOT_LABELS[currentPhotos.length]}`}
+            {currentPhotos.length >= 5 ? "All 5 photos captured" : "Take photo"}
             <input
               type="file"
               accept="image/*"
@@ -645,7 +671,7 @@ export default function Home() {
                   </div>
                 ) : filteredItems.length === 0 ? (
                   <div className="text-center py-20 text-[#8A7F63]">
-                    <Package size={28} className="mx-auto mb-3 opacity-40" />
+                    <SunflowerIcon size={32} className="mx-auto mb-3 text-[#8A7F63] opacity-40" />
                     <p className="text-sm">
                       {stockFilter === "sold" ? "No sold items yet." : "No stock yet. Capture your first item."}
                     </p>
