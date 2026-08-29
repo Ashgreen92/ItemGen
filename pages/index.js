@@ -53,25 +53,38 @@ function resizeDataUrl(dataUrl, maxWidth, quality) {
   });
 }
 
-async function ensureUnderSizeLimit(photos, maxTotalBytes = 3500000) {
+function estimateBytes(dataUrl) {
+  return Math.round(dataUrl.length * 0.75);
+}
+
+async function ensureUnderSizeLimit(photos, maxTotalBytes = 3200000) {
   let current = photos;
-  let quality = 0.6;
-  let width = 800;
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const totalBytes = current.reduce((sum, p) => sum + p.length * 0.75, 0);
+  let quality = 0.5;
+  let width = 700;
+  for (let attempt = 0; attempt < 7; attempt++) {
+    const totalBytes = current.reduce((sum, p) => sum + estimateBytes(p), 0);
     if (totalBytes <= maxTotalBytes) return current;
-    quality = Math.max(0.3, quality - 0.15);
-    width = Math.max(400, Math.round(width * 0.75));
-    current = await Promise.all(current.map((p) => resizeDataUrl(p, width, quality).catch(() => p)));
+    current = await Promise.all(
+      current.map((p) => resizeDataUrl(p, width, quality))
+    );
+    quality = Math.max(0.25, quality - 0.05);
+    width = Math.max(250, Math.round(width * 0.8));
+  }
+  const finalBytes = current.reduce((sum, p) => sum + estimateBytes(p), 0);
+  if (finalBytes > maxTotalBytes) {
+    throw new Error(
+      `Photos still ${(finalBytes / 1000000).toFixed(1)}MB after compression (${current.length} photos, limit ${(maxTotalBytes / 1000000).toFixed(1)}MB)`
+    );
   }
   return current;
 }
 
 async function analyzeItem(photos) {
+  const bodyStr = JSON.stringify({ photos });
   const res = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ photos }),
+    body: bodyStr,
   });
   if (!res.ok) {
     let detail = "AI request failed";
@@ -79,7 +92,8 @@ async function analyzeItem(photos) {
       const body = await res.json();
       detail = body.error || detail;
     } catch {}
-    throw new Error(`${detail} (HTTP ${res.status})`);
+    const sentMB = (bodyStr.length / 1000000).toFixed(2);
+    throw new Error(`${detail} (HTTP ${res.status}, sent ${sentMB}MB, ${photos.length} photos)`);
   }
   return res.json();
 }
