@@ -63,7 +63,7 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         model: "claude-sonnet-5",
-        max_tokens: 1000,
+        max_tokens: 2500,
         messages: [
           {
             role: "user",
@@ -89,10 +89,19 @@ export default async function handler(req, res) {
     const start = text.indexOf("{");
     const end = text.lastIndexOf("}");
     if (start === -1 || end === -1) {
-      return res.status(502).json({ error: "No JSON found in AI response" });
+      console.error("No JSON in response. Raw text:", text);
+      const snippet = text.slice(0, 200) || "(empty response)";
+      return res.status(502).json({ error: `No JSON found in AI response. Got: "${snippet}"` });
     }
 
-    const result = JSON.parse(text.slice(start, end + 1));
+    let result;
+    try {
+      result = JSON.parse(text.slice(start, end + 1));
+    } catch (parseErr) {
+      console.error("JSON parse failed. Raw text:", text);
+      const snippet = text.slice(0, 200);
+      return res.status(502).json({ error: `Couldn't parse AI response as JSON. Got: "${snippet}"` });
+    }
     return res.status(200).json(result);
   } catch (err) {
     console.error("Analyze route failed:", err);
