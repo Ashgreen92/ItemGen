@@ -8,7 +8,7 @@ Step 3: Respond with ONLY a JSON object as your final message, no markdown fence
 
 {
   "title": "short punchy resale title, under 80 characters. Only state details you actually observed per Step 1 — if you're not sure of the exact product line/model, use a generic accurate description instead (e.g. 'Men's Navy T-Shirt' not a specific product line you can't confirm)",
-  "description": "2-4 sentence listing description containing ONLY visually confirmed facts and any visible wear/flaws. Do not state a size, material, or exact model unless it's legible in the photos",
+  "description": "2-4 sentence listing description containing ONLY visually confirmed facts and any visible wear/flaws. Write it the way a person selling the item would write it - state facts plainly (e.g. 'Size 18½. Polyester-cotton blend.') Never narrate how you know something (no phrases like 'tag confirms', 'as shown in photos', 'visible in the images', 'label indicates') - that reads as an AI wrote it, not a seller",
   "category": "best-fit resale category, e.g. Men's Trainers, Vintage Coats, Kids Toys",
   "condition": "one of: New with tags, New without tags, Excellent, Good, Fair, Well worn",
   "brand": "brand name if visible, else empty string",
