@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Camera, X, Loader2, Trash2, Pencil, ChevronLeft, Package, Check, RefreshCw, AlertCircle, Tag, Lock, Copy, Download } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
+const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra"];
+
 // ---------- image helpers ----------
 
 function compressImage(file, maxWidth, quality) {
@@ -257,6 +259,8 @@ export default function Home() {
   const [stockFilter, setStockFilter] = useState("active");
   const [loadedItems, setLoadedItems] = useState(false);
   const [currentPhotos, setCurrentPhotos] = useState([]);
+  const [currentBatch, setCurrentBatch] = useState("");
+  const [batchFilter, setBatchFilter] = useState("all");
   const [capturing, setCapturing] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
   const [editDraft, setEditDraft] = useState(null);
@@ -321,6 +325,7 @@ export default function Home() {
           price_high: result.estimated_price_high ?? null,
           confidence: result.confidence || "medium",
           notes: result.notes || "",
+          verify_before_listing: Array.isArray(result.verify_before_listing) ? result.verify_before_listing : [],
           status: "ready",
         })
         .eq("id", id);
@@ -342,6 +347,7 @@ export default function Home() {
           status: "processing",
           photos: currentPhotos,
           thumbnail,
+          batch: currentBatch.trim() || null,
         })
         .select()
         .single();
@@ -463,12 +469,35 @@ export default function Home() {
 
       {view === "capture" && (
         <div className="flex-1 flex flex-col p-4 sm:p-8 max-w-xl w-full mx-auto">
+          <div className="mb-4">
+            <label className="text-xs text-[#8A7F63] uppercase tracking-wide mb-1 block">
+              Batch / lot (optional — e.g. "Box of jumpers")
+            </label>
+            <input
+              list="batch-suggestions"
+              value={currentBatch}
+              onChange={(e) => setCurrentBatch(e.target.value)}
+              placeholder="Leave blank for no batch"
+              className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
+            />
+            <datalist id="batch-suggestions">
+              {[...new Set(items.map((i) => i.batch).filter(Boolean))].map((b) => (
+                <option key={b} value={b} />
+              ))}
+            </datalist>
+            {currentBatch && (
+              <p className="text-xs text-[#8A7F63] mt-1">
+                Every item you capture will be tagged "{currentBatch}" until you change or clear this.
+              </p>
+            )}
+          </div>
+
           <p className="text-[#6B6250] text-sm mb-4">
-            Photograph one item from a few angles, then press <span className="text-[#2B2620] font-medium">Next item</span>. It processes in the background — check Stock on either phone or laptop for the finished ad.
+            Follow the prompts below for the best identification, then press <span className="text-[#2B2620] font-medium">Next item</span>. Photos 1–2 are the minimum; the label shot especially helps the AI identify the exact item instead of guessing.
           </p>
 
-          <div className="grid grid-cols-5 gap-2 mb-4">
-            {Array.from({ length: 5 }).map((_, i) => (
+          <div className="grid grid-cols-5 gap-2 mb-1">
+            {SHOT_LABELS.map((label, i) => (
               <div key={i} className="aspect-square rounded-sm border border-[#C9BFA3] overflow-hidden flex items-center justify-center bg-[#F7F3E8] relative">
                 {currentPhotos[i] ? (
                   <>
@@ -481,9 +510,16 @@ export default function Home() {
                     </button>
                   </>
                 ) : (
-                  <span className="text-[#A79B7C] text-xs">{i + 1}</span>
+                  <span className="text-[#A79B7C] text-[10px] text-center px-1 leading-tight">{label}</span>
                 )}
               </div>
+            ))}
+          </div>
+          <div className="grid grid-cols-5 gap-2 mb-4">
+            {SHOT_LABELS.map((label, i) => (
+              <span key={i} className="text-[9px] text-center text-[#8A7F63] uppercase tracking-wide">
+                {i + 1}{i < 2 ? " · req" : ""}
+              </span>
             ))}
           </div>
 
@@ -493,7 +529,7 @@ export default function Home() {
             }`}
           >
             {capturing ? <Loader2 size={18} className="animate-spin" /> : <Camera size={18} />}
-            {currentPhotos.length === 0 ? "Take photo" : `Add photo (${currentPhotos.length}/5)`}
+            {currentPhotos.length >= 5 ? "All 5 photos captured" : `Take photo — ${SHOT_LABELS[currentPhotos.length]}`}
             <input
               type="file"
               accept="image/*"
@@ -546,9 +582,36 @@ export default function Home() {
           </div>
 
           {(() => {
-            const filteredItems = items.filter((e) =>
-              stockFilter === "all" ? true : stockFilter === "sold" ? e.status === "sold" : e.status !== "sold"
-            );
+            const batches = [...new Set(items.map((i) => i.batch).filter(Boolean))].sort();
+            return batches.length > 0 ? (
+              <div className="flex flex-wrap gap-2 mb-4">
+                <button
+                  onClick={() => setBatchFilter("all")}
+                  className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
+                    batchFilter === "all" ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
+                  }`}
+                >
+                  All batches
+                </button>
+                {batches.map((b) => (
+                  <button
+                    key={b}
+                    onClick={() => setBatchFilter(b)}
+                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
+                      batchFilter === b ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
+                    }`}
+                  >
+                    {b} ({items.filter((i) => i.batch === b).length})
+                  </button>
+                ))}
+              </div>
+            ) : null;
+          })()}
+
+          {(() => {
+            const filteredItems = items
+              .filter((e) => (stockFilter === "all" ? true : stockFilter === "sold" ? e.status === "sold" : e.status !== "sold"))
+              .filter((e) => (batchFilter === "all" ? true : e.batch === batchFilter));
             const soldItems = items.filter((e) => e.status === "sold");
             const revenue = soldItems.reduce((s, e) => s + (Number(e.sale_price) || 0), 0);
             const cost = soldItems.reduce((s, e) => s + (Number(e.cost_price) || 0), 0);
@@ -620,7 +683,9 @@ export default function Home() {
                               e.status === "ready" && <PriceTag low={e.price_low} high={e.price_high} />
                             )}
                           </div>
-                          <span className="text-xs font-mono text-[#8A7F63] block mt-1">#{stockNumber(e)}</span>
+                          <span className="text-xs font-mono text-[#8A7F63] block mt-1">
+                            #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
+                          </span>
                           {(e.ebay_listed || e.vinted_listed || e.depop_listed) && (
                             <span className="text-xs text-[#3F5E42] block mt-0.5">
                               {[e.ebay_listed && "eBay", e.vinted_listed && "Vinted", e.depop_listed && "Depop"].filter(Boolean).join(" · ")}
@@ -755,6 +820,22 @@ export default function Home() {
                 <ListingHelper item={selectedItem} />
 
                 <ListedToggles item={selectedItem} onToggle={togglePlatform} />
+
+                {selectedItem.verify_before_listing?.length > 0 && (
+                  <div className="bg-[#A63A2E]/10 border border-[#A63A2E]/30 rounded-sm p-3 mb-5">
+                    <p className="text-xs font-semibold text-[#A63A2E] uppercase tracking-wide mb-2">
+                      Check before listing — not confirmed from photos
+                    </p>
+                    <ul className="text-sm text-[#2B2620] flex flex-col gap-1">
+                      {selectedItem.verify_before_listing.map((v, i) => (
+                        <li key={i} className="flex gap-2">
+                          <span className="text-[#A63A2E]">·</span>
+                          <span>{v}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
 
                 {!editing ? (
                   <button
