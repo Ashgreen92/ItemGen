@@ -39,9 +39,16 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Server is missing ANTHROPIC_API_KEY" });
   }
 
-  const { photos } = req.body || {};
+  const { photos, knownSize, knownDetails } = req.body || {};
   if (!Array.isArray(photos) || photos.length === 0) {
     return res.status(400).json({ error: "No photos provided" });
+  }
+
+  let knownFactsNote = "";
+  if (knownSize || knownDetails) {
+    knownFactsNote = "\n\nThe seller has personally confirmed the following - treat these as verified fact, not something to guess or flag as uncertain, and incorporate them directly into the title/description/verify_before_listing as appropriate:";
+    if (knownSize) knownFactsNote += `\n- Size: ${knownSize}`;
+    if (knownDetails) knownFactsNote += `\n- Other confirmed details: ${knownDetails}`;
   }
 
   try {
@@ -67,7 +74,7 @@ export default async function handler(req, res) {
         messages: [
           {
             role: "user",
-            content: [...imageBlocks, { type: "text", text: PROMPT }],
+            content: [...imageBlocks, { type: "text", text: PROMPT + knownFactsNote }],
           },
         ],
         tools: [{ type: "web_search_20250305", name: "web_search" }],
