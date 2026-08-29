@@ -519,7 +519,7 @@ export default function Home() {
           </div>
 
           <p className="text-[#6B6250] text-sm mb-4">
-            For best results, try to capture: <span className="font-bold text-[#2B2620]">front · back · label or markings · close-up of any damage · one extra angle</span>. Photos are compressed automatically, so there's no downside to taking all 5. Then press <span className="text-[#2B2620] font-medium">Next item</span>.
+            For best results, try to capture: <span className="font-bold text-[#2B2620]">front · back · label or markings · close-up of any damage · one extra angle</span>. Press <span className="text-[#2B2620] font-medium">Next item</span> to submit these photos for AI identification and pricing.
           </p>
 
           <div className="grid grid-cols-5 gap-2 mb-1">
