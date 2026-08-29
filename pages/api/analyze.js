@@ -12,10 +12,12 @@ Step 3: Respond with ONLY a JSON object as your final message, no markdown fence
   "category": "best-fit resale category, e.g. Men's Trainers, Vintage Coats, Kids Toys",
   "condition": "one of: New with tags, New without tags, Excellent, Good, Fair, Well worn",
   "brand": "brand name if visible, else empty string",
+  "size_applicable": true or false. True only if this item is clothing or footwear where a size is a normal, expected listing detail. False for anything else (electronics, homeware, toys, accessories without sizing, etc.),
+  "size": "the exact size if you can read it on a visible label/tag, else null. Only relevant when size_applicable is true",
   "estimated_price_low": number (GBP, no symbol, based on real comparable listings you found),
   "estimated_price_high": number (GBP, no symbol, based on real comparable listings you found),
   "confidence": "high, medium, or low - your confidence in the identification AND the price data",
-  "verify_before_listing": ["a list of specific things the seller should personally check before publishing because they were NOT confirmable from the photos - e.g. 'Exact size - no label visible in photos', 'Fabric composition - no care tag visible'. Leave as an empty array only if everything material was genuinely visible and confirmed."],
+  "verify_before_listing": ["a list of specific things the seller should personally check before publishing because they were NOT confirmable from the photos - e.g. 'Fabric composition - no care tag visible'. Do not include size here if size_applicable is true - that's handled separately. Leave as an empty array only if everything material was genuinely visible and confirmed."],
   "notes": "state what you searched for and what comparable listings/prices you actually found. If you could not find good comparables, say so plainly and set confidence to low."
 }
 
@@ -39,16 +41,9 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Server is missing ANTHROPIC_API_KEY" });
   }
 
-  const { photos, knownSize, knownDetails } = req.body || {};
+  const { photos } = req.body || {};
   if (!Array.isArray(photos) || photos.length === 0) {
     return res.status(400).json({ error: "No photos provided" });
-  }
-
-  let knownFactsNote = "";
-  if (knownSize || knownDetails) {
-    knownFactsNote = "\n\nThe seller has personally confirmed the following - treat these as verified fact, not something to guess or flag as uncertain, and incorporate them directly into the title/description/verify_before_listing as appropriate:";
-    if (knownSize) knownFactsNote += `\n- Size: ${knownSize}`;
-    if (knownDetails) knownFactsNote += `\n- Other confirmed details: ${knownDetails}`;
   }
 
   try {
@@ -74,7 +69,7 @@ export default async function handler(req, res) {
         messages: [
           {
             role: "user",
-            content: [...imageBlocks, { type: "text", text: PROMPT + knownFactsNote }],
+            content: [...imageBlocks, { type: "text", text: PROMPT }],
           },
         ],
         tools: [{ type: "web_search_20250305", name: "web_search" }],
