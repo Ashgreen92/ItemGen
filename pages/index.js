@@ -111,6 +111,34 @@ function SunflowerIcon({ size = 16, className = "" }) {
   );
 }
 
+function BackgroundSunflower() {
+  const outerAngles = Array.from({ length: 15 }, (_, i) => i * 24);
+  const innerAngles = Array.from({ length: 10 }, (_, i) => i * 36 + 12);
+  return (
+    <svg
+      viewBox="0 0 400 400"
+      className="fixed bottom-0 right-0 pointer-events-none select-none"
+      style={{ width: "min(60vw, 480px)", height: "auto", zIndex: 0 }}
+      aria-hidden="true"
+    >
+      <g transform="translate(400,400)">
+        <g opacity="0.16">
+          {outerAngles.map((a) => (
+            <ellipse key={a} cx="0" cy="-160" rx="42" ry="95" fill="#C98A2C" transform={`rotate(${a})`} />
+          ))}
+        </g>
+        <g opacity="0.22">
+          {innerAngles.map((a) => (
+            <ellipse key={a} cx="0" cy="-160" rx="30" ry="68" fill="#A9822E" transform={`rotate(${a})`} />
+          ))}
+        </g>
+        <circle cx="0" cy="-160" r="46" fill="#6B4A1E" opacity="0.24" />
+        <circle cx="0" cy="-160" r="46" fill="none" stroke="#5C3A1E" strokeWidth="0.5" opacity="0.2" />
+      </g>
+    </svg>
+  );
+}
+
 function StatusBadge({ item }) {
   const status = item.status;
   const map = {
@@ -876,7 +904,8 @@ export default function Home() {
   if (!unlocked) return <PasscodeGate onUnlock={() => setUnlocked(true)} />;
 
   return (
-    <div className="min-h-screen bg-[#EDE6D6] text-[#2B2620] flex flex-col">
+    <div className="min-h-screen bg-[#EDE6D6] text-[#2B2620] flex flex-col relative">
+      <BackgroundSunflower />
       <div className="border-b-4 border-double border-[#8A7F63] px-4 sm:px-8 py-3 flex items-center justify-between sticky top-0 bg-[#EDE6D6]/95 backdrop-blur z-10">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 flex items-center justify-center shrink-0 text-[#A9822E]">
