@@ -70,44 +70,19 @@ function autoEnhance(dataUrl) {
           ctx.drawImage(img, 0, 0);
           const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
           const data = imageData.data;
-          const n = data.length / 4;
 
-          // Gray-world white balance, blended at 50% strength
-          let sumR = 0, sumG = 0, sumB = 0;
+          // Simple uniform brightness lift - every pixel scaled by the same
+          // amount. No colour-channel white balance, no contrast/levels
+          // stretching - both distorted how items looked (yellow tints,
+          // blotchy fading). A flat multiply can't do that: it can't shift
+          // hue, and it can't unevenly redistribute tones, so a light sheet
+          // gets whiter while a dark item just stays the same dark item,
+          // marginally brighter.
+          const brightnessBoost = 1.12;
           for (let i = 0; i < data.length; i += 4) {
-            sumR += data[i]; sumG += data[i + 1]; sumB += data[i + 2];
-          }
-          const avgR = sumR / n, avgG = sumG / n, avgB = sumB / n;
-          const avgGray = (avgR + avgG + avgB) / 3;
-          const wbStrength = 0.25;
-          const clamp = (v) => Math.max(0.9, Math.min(1.1, v));
-          const rScale = clamp(1 + wbStrength * (avgGray / (avgR || 1) - 1));
-          const gScale = clamp(1 + wbStrength * (avgGray / (avgG || 1) - 1));
-          const bScale = clamp(1 + wbStrength * (avgGray / (avgB || 1) - 1));
-
-          // Percentile-based contrast/exposure stretch (1st-99th percentile),
-          // blended at 60% so shadows/highlights aren't crushed or blown out
-          const hist = new Array(256).fill(0);
-          for (let i = 0; i < data.length; i += 4) {
-            const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-            hist[Math.max(0, Math.min(255, Math.round(lum)))]++;
-          }
-          let cum = 0, lowP = 0;
-          for (let v = 0; v < 256; v++) { cum += hist[v]; if (cum >= n * 0.01) { lowP = v; break; } }
-          cum = 0; let highP = 255;
-          for (let v = 255; v >= 0; v--) { cum += hist[v]; if (cum >= n * 0.01) { highP = v; break; } }
-          const range = Math.max(1, highP - lowP);
-          const contrastStrength = 0.6;
-
-          for (let i = 0; i < data.length; i += 4) {
-            let r = data[i] * rScale;
-            let g = data[i + 1] * gScale;
-            let b = data[i + 2] * bScale;
-            const stretch = (v) => v + contrastStrength * (((v - lowP) / range) * 255 - v);
-            r = stretch(r); g = stretch(g); b = stretch(b);
-            data[i] = Math.max(0, Math.min(255, r));
-            data[i + 1] = Math.max(0, Math.min(255, g));
-            data[i + 2] = Math.max(0, Math.min(255, b));
+            data[i] = Math.min(255, data[i] * brightnessBoost);
+            data[i + 1] = Math.min(255, data[i + 1] * brightnessBoost);
+            data[i + 2] = Math.min(255, data[i + 2] * brightnessBoost);
           }
 
           ctx.putImageData(imageData, 0, 0);
