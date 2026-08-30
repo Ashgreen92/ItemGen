@@ -745,12 +745,8 @@ export default function Home() {
   }, []);
 
   const fetchItems = useCallback(async () => {
-    const { data, error } = await supabase
-      .from("items")
-      .select(
-        "id, title, description, category, condition, brand, price_low, price_high, confidence, notes, status, thumbnail, created_at, sale_price, cost_price, ebay_listed, vinted_listed, depop_listed, verify_before_listing, batch, ebay_listed_at, vinted_listed_at, depop_listed_at, size, size_applicable, vinted_price_low, vinted_price_high, demand, listing_recommendation, error_detail, ebay_search_query, used_real_ebay_data, ebay_active_listings, vinted_reduced_at, relisted_at, payment_received, payment_received_at, posted_at"
-      )
-      .order("created_at", { ascending: false });
+    const { data, error } = await supabase.from("items").select("*").order("created_at", { ascending: false });
+    if (error) console.error("fetchItems failed:", error);
     if (!error && data) setItems(data);
     setLoadedItems(true);
   }, []);
@@ -1529,10 +1525,21 @@ export default function Home() {
             </div>
 
             {selectedItem.status === "processing" && (
-              <p className="text-sm text-[#6B6250] flex items-center gap-2">
-                <Loader2 size={14} className="animate-spin" />
-                Writing the ad up now — check back in a moment.
-              </p>
+              <div className="mb-4">
+                <p className="text-sm text-[#6B6250] flex items-center gap-2 mb-3">
+                  <Loader2 size={14} className="animate-spin" />
+                  Writing the ad up now — check back in a moment.
+                </p>
+                <p className="text-xs text-[#8A7F63] mb-2">
+                  Normally finishes in under a minute. Taking much longer usually means the tab that started it was closed or lost connection before it finished — in that case nothing will ever complete it on its own.
+                </p>
+                <button
+                  onClick={() => retryItem(selectedItem)}
+                  className="flex items-center gap-1.5 text-xs font-medium bg-[#A9822E]/15 text-[#A9822E] px-2.5 py-1.5 rounded-md"
+                >
+                  <RefreshCw size={12} /> Restart processing
+                </button>
+              </div>
             )}
 
             {selectedItem.status === "error" && (
