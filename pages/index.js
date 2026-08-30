@@ -1072,8 +1072,7 @@ export default function Home() {
               <>
                 <p className="font-serif text-2xl mb-1">Item Status</p>
                 <p className="text-sm text-[#8A7F63] mb-5">
-                  Where each active listing sits in the eBay → Vinted → reduce → relist cycle.
-                </p>
+                                </p>
 
                 <div className="flex flex-wrap gap-2 mb-5">
                   <button
