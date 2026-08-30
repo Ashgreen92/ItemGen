@@ -191,7 +191,7 @@ export default async function handler(req, res) {
     const promptText = isQuick ? QUICK_PROMPT : buildFullPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings);
 
     const body = {
-      model: "claude-haiku-4-5-20251001",
+      model: isQuick ? "claude-haiku-4-5-20251001" : "claude-sonnet-5",
       max_tokens: isQuick ? 300 : 2500,
       messages: [
         {
