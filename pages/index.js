@@ -906,6 +906,7 @@ export default function Home() {
         price_high: editDraft.price_high,
         size: editDraft.size,
         brand: editDraft.brand,
+        batch: editDraft.batch,
       })
       .eq("id", editDraft.id);
     setSelectedItem(editDraft);
@@ -1838,6 +1839,22 @@ export default function Home() {
                           className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
                         />
                       </div>
+                    </div>
+
+                    <div>
+                      <label className="text-xs text-[#8A7F63] mb-1 block">Box / Category folder</label>
+                      <input
+                        list="edit-batch-suggestions"
+                        value={editDraft.batch || ""}
+                        onChange={(e) => setEditDraft({ ...editDraft, batch: e.target.value })}
+                        placeholder="e.g. Box 1 - leave blank for none"
+                        className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
+                      />
+                      <datalist id="edit-batch-suggestions">
+                        {[...new Set(items.map((i) => i.batch).filter(Boolean))].map((b) => (
+                          <option key={b} value={b} />
+                        ))}
+                      </datalist>
                     </div>
 
                     <div>
