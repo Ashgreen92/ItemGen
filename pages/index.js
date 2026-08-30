@@ -1354,19 +1354,12 @@ export default function Home() {
                     <span>{selectedItem.vinted_price_low != null ? `£${selectedItem.vinted_price_low}–£${selectedItem.vinted_price_high}` : "Unknown"}</span>
                   </div>
                   <div>
-                    <span className="text-[#8A7F63] text-xs block">Demand (AI estimate)</span>
-                    <span className="capitalize">{selectedItem.demand || "Unknown"}</span>
-                  </div>
-                  <div>
-                    <span className="text-[#8A7F63] text-xs block">Active on eBay now (real)</span>
+                    <span className="text-[#8A7F63] text-xs block">Active on eBay now</span>
                     <span>{selectedItem.ebay_active_listings != null ? selectedItem.ebay_active_listings : "Unknown"}</span>
                   </div>
                 </div>
                 <p className="text-sm text-[#2B2620]">
                   {selectedItem.listing_recommendation || "No recommendation returned for this item."}
-                </p>
-                <p className="text-xs text-[#8A7F63] mt-2">
-                  "Active on eBay now" is a real count of current matching listings, straight from eBay's API - more listings generally means more competition. It's not a sell-through rate - eBay doesn't give apps like this access to actual sold-item statistics. "Demand" is the AI's read of what it saw in search, not a verified figure.
                 </p>
               </div>
             )}
