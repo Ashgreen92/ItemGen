@@ -110,16 +110,16 @@ function autoEnhance(dataUrl) {
           }
 
           ctx.putImageData(imageData, 0, 0);
-          resolve(canvas.toDataURL("image/jpeg", 0.85));
+          resolve({ url: canvas.toDataURL("image/jpeg", 0.85), enhanced: true });
         } catch (err) {
           console.error("Photo enhancement failed, using original:", err);
-          resolve(dataUrl);
+          resolve({ url: dataUrl, enhanced: false });
         }
       };
-      img.onerror = () => resolve(dataUrl);
+      img.onerror = () => resolve({ url: dataUrl, enhanced: false });
       img.src = dataUrl;
     } catch (err) {
-      resolve(dataUrl);
+      resolve({ url: dataUrl, enhanced: false });
     }
   });
 }
@@ -714,6 +714,7 @@ export default function Home() {
   const [stockFilter, setStockFilter] = useState("active");
   const [loadedItems, setLoadedItems] = useState(false);
   const [currentPhotos, setCurrentPhotos] = useState([]);
+  const [enhancedFlags, setEnhancedFlags] = useState([]);
   const [currentBatch, setCurrentBatch] = useState("");
   const [batchFilter, setBatchFilter] = useState("all");
   const [stockSearch, setStockSearch] = useState("");
@@ -767,9 +768,10 @@ export default function Home() {
     if (!file) return;
     setCapturing(true);
     try {
-      const full = await compressImage(file, 800, 0.6);
-      const enhanced = await autoEnhance(full);
-      setCurrentPhotos((prev) => [...prev, enhanced].slice(0, 5));
+      const full = await compressImage(file, 1600, 0.85);
+      const result = await autoEnhance(full);
+      setCurrentPhotos((prev) => [...prev, result.url].slice(0, 5));
+      setEnhancedFlags((prev) => [...prev, result.enhanced].slice(0, 5));
     } catch (err) {
       console.error(err);
     } finally {
@@ -858,6 +860,7 @@ export default function Home() {
 
       if (error) throw error;
       setCurrentPhotos([]);
+      setEnhancedFlags([]);
       fetchItems();
       processItem(data.id, currentPhotos);
     } catch (err) {
@@ -1285,8 +1288,19 @@ export default function Home() {
                 {currentPhotos[i] ? (
                   <>
                     <img src={currentPhotos[i]} alt="" className="w-full h-full object-cover" />
+                    {enhancedFlags[i] && (
+                      <span
+                        className="absolute bottom-0.5 left-0.5 bg-[#3F5E42] text-white rounded-sm px-1 py-0.5 text-[8px] font-mono uppercase tracking-wide flex items-center gap-0.5"
+                        title="Lighting/colour auto-corrected"
+                      >
+                        <Check size={8} /> Enhanced
+                      </span>
+                    )}
                     <button
-                      onClick={() => setCurrentPhotos((p) => p.filter((_, idx) => idx !== i))}
+                      onClick={() => {
+                        setCurrentPhotos((p) => p.filter((_, idx) => idx !== i));
+                        setEnhancedFlags((p) => p.filter((_, idx) => idx !== i));
+                      }}
                       className="absolute top-0.5 right-0.5 bg-[#EDE6D6]/80 rounded-full p-0.5"
                     >
                       <X size={11} />
