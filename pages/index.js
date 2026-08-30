@@ -889,13 +889,13 @@ export default function Home() {
             onClick={() => setView("dashboard")}
             className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "dashboard" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
           >
-            Dashboard
+            Home
           </button>
           <button
             onClick={() => setView("capture")}
             className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "capture" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
           >
-            Capture
+            Upload New
           </button>
           <button
             onClick={() => setView("stock")}
@@ -924,8 +924,7 @@ export default function Home() {
 
             return (
               <>
-                <p className="font-serif text-2xl mb-1">Dashboard</p>
-                <p className="text-sm text-[#8A7F63] mb-6">A running total of everything moving through the ledger.</p>
+                <p className="font-serif text-2xl mb-6">Home</p>
 
                 <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-8">
                   {[
@@ -955,7 +954,7 @@ export default function Home() {
                     className="flex-1 py-3 rounded bg-[#A9822E] text-[#2B2620] font-bold flex items-center justify-center gap-2"
                   >
                     <Camera size={16} />
-                    Capture new item
+                    Upload New Item
                   </button>
                   <button
                     onClick={() => {
@@ -966,7 +965,7 @@ export default function Home() {
                     }}
                     className="flex-1 py-3 rounded bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-medium"
                   >
-                    View all stock
+                    View All Items
                   </button>
                 </div>
 
