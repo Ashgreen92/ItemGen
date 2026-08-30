@@ -53,6 +53,77 @@ function resizeDataUrl(dataUrl, maxWidth, quality) {
   });
 }
 
+// Gentle automatic photo correction - white balance + exposure/contrast.
+// Deliberately blended (not full-strength) so it improves lighting without
+// distorting the item's true colour or hiding flaws. Fails safe: if anything
+// goes wrong, returns the original photo untouched rather than breaking capture.
+function autoEnhance(dataUrl) {
+  return new Promise((resolve) => {
+    try {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const data = imageData.data;
+          const n = data.length / 4;
+
+          // Gray-world white balance, blended at 50% strength
+          let sumR = 0, sumG = 0, sumB = 0;
+          for (let i = 0; i < data.length; i += 4) {
+            sumR += data[i]; sumG += data[i + 1]; sumB += data[i + 2];
+          }
+          const avgR = sumR / n, avgG = sumG / n, avgB = sumB / n;
+          const avgGray = (avgR + avgG + avgB) / 3;
+          const wbStrength = 0.5;
+          const rScale = 1 + wbStrength * (avgGray / (avgR || 1) - 1);
+          const gScale = 1 + wbStrength * (avgGray / (avgG || 1) - 1);
+          const bScale = 1 + wbStrength * (avgGray / (avgB || 1) - 1);
+
+          // Percentile-based contrast/exposure stretch (1st-99th percentile),
+          // blended at 60% so shadows/highlights aren't crushed or blown out
+          const hist = new Array(256).fill(0);
+          for (let i = 0; i < data.length; i += 4) {
+            const lum = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+            hist[Math.max(0, Math.min(255, Math.round(lum)))]++;
+          }
+          let cum = 0, lowP = 0;
+          for (let v = 0; v < 256; v++) { cum += hist[v]; if (cum >= n * 0.01) { lowP = v; break; } }
+          cum = 0; let highP = 255;
+          for (let v = 255; v >= 0; v--) { cum += hist[v]; if (cum >= n * 0.01) { highP = v; break; } }
+          const range = Math.max(1, highP - lowP);
+          const contrastStrength = 0.6;
+
+          for (let i = 0; i < data.length; i += 4) {
+            let r = data[i] * rScale;
+            let g = data[i + 1] * gScale;
+            let b = data[i + 2] * bScale;
+            const stretch = (v) => v + contrastStrength * (((v - lowP) / range) * 255 - v);
+            r = stretch(r); g = stretch(g); b = stretch(b);
+            data[i] = Math.max(0, Math.min(255, r));
+            data[i + 1] = Math.max(0, Math.min(255, g));
+            data[i + 2] = Math.max(0, Math.min(255, b));
+          }
+
+          ctx.putImageData(imageData, 0, 0);
+          resolve(canvas.toDataURL("image/jpeg", 0.85));
+        } catch (err) {
+          console.error("Photo enhancement failed, using original:", err);
+          resolve(dataUrl);
+        }
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    } catch (err) {
+      resolve(dataUrl);
+    }
+  });
+}
+
 function estimateBytes(dataUrl) {
   return Math.round(dataUrl.length * 0.75);
 }
@@ -697,7 +768,8 @@ export default function Home() {
     setCapturing(true);
     try {
       const full = await compressImage(file, 800, 0.6);
-      setCurrentPhotos((prev) => [...prev, full].slice(0, 5));
+      const enhanced = await autoEnhance(full);
+      setCurrentPhotos((prev) => [...prev, enhanced].slice(0, 5));
     } catch (err) {
       console.error(err);
     } finally {
