@@ -42,9 +42,9 @@ Step 3: Respond with ONLY a JSON object as your final message, no markdown fence
 
 {
   "title": "short punchy resale title, under 80 characters. Only state details you actually observed per Step 1${lines.length ? " (the seller-confirmed facts above may be included)" : ""} — if you're not sure of the exact product line/model, use a generic accurate description instead (e.g. 'Men's Navy T-Shirt' not a specific product line you can't confirm)",
-  "description": "2-4 sentence listing description containing ONLY visually confirmed positive facts${lines.length ? " plus the seller-confirmed facts above" : ""} and any visible wear/flaws. Write it the way a person selling the item would write it - state facts plainly (e.g. 'Size 18½. Polyester-cotton blend.') Never narrate how you know something (no phrases like 'tag confirms', 'as shown in photos', 'visible in the images', 'label indicates', 'seller confirmed') - that reads as an AI wrote it, not a seller. Just as important: NEVER state what ISN'T visible or wasn't included (no 'no label visible', 'no size tag shown', 'material unknown', etc.) - a real seller's listing only states what the item IS, never what information is missing. Anything not confirmable goes in verify_before_listing instead, never in the description",
+  "description": "2-4 sentence listing description containing ONLY visually confirmed positive facts${lines.length ? " plus the seller-confirmed facts above" : ""} and any visible wear/flaws. Write it the way a person selling the item would write it - state facts plainly (e.g. 'Size 18½. Polyester-cotton blend.') Never narrate how you know something (no phrases like 'tag confirms', 'as shown in photos', 'visible in the images', 'label indicates', 'seller confirmed') - that reads as an AI wrote it, not a seller. Just as important: NEVER state what ISN'T visible or wasn't included (no 'no label visible', 'no size tag shown', 'material unknown', etc.) - a real seller's listing only states what the item IS, never what information is missing. Anything not confirmable goes in verify_before_listing instead, never in the description. CRITICAL for wear/flaw callouts: distinguish intentional design from genuine damage. Faded/distressed denim, stone-wash, acid-wash, deliberately ripped/frayed styling, and similar vintage-style treatments are the item's ORIGINAL DESIGN, not wear - never describe these as flaws, fading, or damage. Only call out fading/wear/damage that is clearly UNEVEN, ACCIDENTAL, or ADDITIONAL to the item's evident design (e.g. a stain, a new tear in a plain non-distressed garment, sun-fading on only part of an otherwise solid-colour item)\",
   "category": "best-fit resale category, e.g. Men's Trainers, Vintage Coats, Kids Toys.${cf.category ? " The seller has already confirmed this is: " + cf.category + " - use that exact value." : " Be careful with garment TYPE specifically (top vs dress vs jumpsuit vs romper etc.) - only state a specific type if the photos clearly show the item's full length/silhouette. If you can't see enough of the garment to be sure whether it's cropped, full-length, one-piece, etc., use the safest/most generic accurate label and add a note to verify_before_listing rather than confidently asserting the wrong type"}",
-  "condition": "one of: New with tags, New without tags, Excellent, Good, Fair, Well worn${cf.condition ? " (seller has confirmed: " + cf.condition + " - use that)" : ""}",
+  "condition": "one of: New with tags, New without tags, Excellent, Good, Fair, Well worn. Judge condition on genuine wear/damage only - intentional design fading/distressing (stone-wash, acid-wash, factory-distressed denim, etc.) is not a flaw and shouldn't by itself lower the rating below Excellent/Good if the item is otherwise in good order${cf.condition ? " (seller has confirmed: " + cf.condition + " - use that)" : ""}",
   "brand": "brand name if visible, else empty string${cf.brand ? " (seller has confirmed: " + cf.brand + " - use that)" : ""}",
   "estimated_price_low": number (GBP, no symbol),
   "estimated_price_high": number (GBP, no symbol),
@@ -79,7 +79,14 @@ function extractJson(text) {
 
 // ---------- eBay Browse API ----------
 
+let cachedEbayToken = null;
+let cachedEbayTokenExpiry = 0;
+
 async function getEbayToken() {
+  if (cachedEbayToken && Date.now() < cachedEbayTokenExpiry) {
+    return cachedEbayToken;
+  }
+
   const clientId = process.env.EBAY_CLIENT_ID;
   const clientSecret = process.env.EBAY_CLIENT_SECRET;
   if (!clientId || !clientSecret) return null;
@@ -98,7 +105,12 @@ async function getEbayToken() {
     return null;
   }
   const data = await res.json();
-  return data.access_token || null;
+  if (!data.access_token) return null;
+
+  cachedEbayToken = data.access_token;
+  // expires_in is in seconds; refresh a bit early to be safe
+  cachedEbayTokenExpiry = Date.now() + (data.expires_in || 7200) * 1000 - 60000;
+  return cachedEbayToken;
 }
 
 async function searchEbay(query, token) {
