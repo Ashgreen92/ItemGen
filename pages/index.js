@@ -214,6 +214,33 @@ function ListedToggles({ item, onToggle }) {
     </div>
   );
 }
+const PIPELINE_STAGES = {
+  not_listed: { label: "Not listed yet", cls: "bg-[#8A7F63]/15 text-[#6B6250] border-[#8A7F63]/30" },
+  early: { label: "On eBay, early days", cls: "bg-[#3F5E42]/15 text-[#3F5E42] border-[#3F5E42]/30" },
+  add_vinted: { label: "Add Vinted now", cls: "bg-[#A9822E]/15 text-[#A9822E] border-[#A9822E]/30" },
+  cut_price: { label: "Cut Vinted price", cls: "bg-[#A63A2E]/15 text-[#A63A2E] border-[#A63A2E]/30" },
+  bundle: { label: "Bundle candidate", cls: "bg-[#A63A2E]/15 text-[#A63A2E] border-[#A63A2E]/30" },
+};
+
+function daysSince(iso) {
+  if (!iso) return null;
+  return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+}
+
+function getPipelineInfo(item) {
+  if (item.status !== "ready") return null;
+  const ebayDays = daysSince(item.ebay_listed_at);
+  const vintedDays = daysSince(item.vinted_listed_at);
+  if (ebayDays === null && vintedDays === null) return { stage: "not_listed", days: null };
+
+  const firstDays = [ebayDays, vintedDays].filter((d) => d !== null).sort((a, b) => b - a)[0];
+
+  if (firstDays >= 35) return { stage: "bundle", days: firstDays };
+  if (firstDays >= 21) return { stage: "cut_price", days: firstDays };
+  if (firstDays >= 7 && vintedDays === null) return { stage: "add_vinted", days: firstDays };
+  return { stage: "early", days: firstDays };
+}
+
 function timeAgo(iso) {
   if (!iso) return "";
   const diffMs = Date.now() - new Date(iso).getTime();
@@ -230,6 +257,8 @@ function timeAgo(iso) {
 function StockListRow({ item: e, onOpen }) {
   const isListed = e.ebay_listed || e.vinted_listed || e.depop_listed;
   const thumb = e.photos?.[0] || e.thumbnail;
+  const pipeline = getPipelineInfo(e);
+  const stageInfo = pipeline && pipeline.stage !== "not_listed" && pipeline.stage !== "early" ? PIPELINE_STAGES[pipeline.stage] : null;
 
   return (
     <button
@@ -260,6 +289,11 @@ function StockListRow({ item: e, onOpen }) {
           <span className="text-xs font-mono text-[#8A7F63]">
             #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
           </span>
+          {stageInfo && (
+            <span className={`inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm border ${stageInfo.cls}`}>
+              {stageInfo.label} · Day {pipeline.days}
+            </span>
+          )}
           {isListed && (
             <div className="flex gap-0.5">
               {e.ebay_listed && (
@@ -510,6 +544,7 @@ export default function Home() {
   const [currentBatch, setCurrentBatch] = useState("");
   const [batchFilter, setBatchFilter] = useState("all");
   const [stockSearch, setStockSearch] = useState("");
+  const [pipelineFilter, setPipelineFilter] = useState("all");
   const [capturing, setCapturing] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
   const [saveDirHandle, setSaveDirHandle] = useState(null);
@@ -586,6 +621,10 @@ export default function Home() {
           confidence: result.confidence || "medium",
           notes: result.notes || "",
           verify_before_listing: Array.isArray(result.verify_before_listing) ? result.verify_before_listing : [],
+          vinted_price_low: result.vinted_price_low ?? null,
+          vinted_price_high: result.vinted_price_high ?? null,
+          demand: result.demand || null,
+          listing_recommendation: result.listing_recommendation || null,
           status: "ready",
         })
         .eq("id", id);
@@ -790,6 +829,12 @@ export default function Home() {
           >
             Stock {items.length > 0 && `(${items.length})`}
           </button>
+          <button
+            onClick={() => setView("pipeline")}
+            className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "pipeline" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
+          >
+            Pipeline
+          </button>
         </div>
       </div>
 
@@ -884,6 +929,99 @@ export default function Home() {
                     </div>
                   </div>
                 )}
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {view === "pipeline" && (
+        <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
+          {(() => {
+            const withStage = items
+              .filter((e) => e.status === "ready")
+              .map((e) => ({ ...e, _pipeline: getPipelineInfo(e) }));
+
+            const filtered = withStage.filter((e) =>
+              pipelineFilter === "all" ? true : e._pipeline?.stage === pipelineFilter
+            );
+
+            // bundle suggestions: same category + size, not sold, count >= 2
+            const groups = {};
+            withStage.forEach((e) => {
+              if (!e.category || !e.size) return;
+              const key = `${e.category.trim().toLowerCase()}|${e.size.trim().toLowerCase()}`;
+              if (!groups[key]) groups[key] = [];
+              groups[key].push(e);
+            });
+            const bundleSuggestions = Object.values(groups).filter((g) => g.length >= 2);
+
+            const stageCounts = {};
+            withStage.forEach((e) => {
+              const s = e._pipeline?.stage;
+              if (s) stageCounts[s] = (stageCounts[s] || 0) + 1;
+            });
+
+            return (
+              <>
+                <p className="font-serif text-2xl mb-1">Pipeline</p>
+                <p className="text-sm text-[#8A7F63] mb-5">
+                  Where each active listing sits in the eBay → Vinted → price-cut cycle.
+                </p>
+
+                <div className="flex flex-wrap gap-2 mb-5">
+                  <button
+                    onClick={() => setPipelineFilter("all")}
+                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === "all" ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"}`}
+                  >
+                    All ({withStage.length})
+                  </button>
+                  {Object.entries(PIPELINE_STAGES).map(([key, s]) => (
+                    <button
+                      key={key}
+                      onClick={() => setPipelineFilter(key)}
+                      className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === key ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"}`}
+                    >
+                      {s.label} ({stageCounts[key] || 0})
+                    </button>
+                  ))}
+                </div>
+
+                {bundleSuggestions.length > 0 && (
+                  <div className="mb-6">
+                    <p className="text-xs font-semibold text-[#A9822E] uppercase tracking-wide mb-2">
+                      Bundle suggestions — same category &amp; size
+                    </p>
+                    <div className="flex flex-col gap-2">
+                      {bundleSuggestions.map((group, i) => (
+                        <div key={i} className="bg-[#A9822E]/8 border border-[#A9822E]/30 rounded-sm p-3">
+                          <p className="text-sm font-medium mb-2">
+                            {group.length}× {group[0].category} · {group[0].size}
+                          </p>
+                          <div className="flex flex-col gap-1.5">
+                            {group.map((e) => (
+                              <button
+                                key={e.id}
+                                onClick={() => openItem(e)}
+                                className="text-sm text-left text-[#2B2620] underline decoration-[#C9BFA3]"
+                              >
+                                {e.title}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex flex-col gap-2">
+                  {filtered.length === 0 ? (
+                    <p className="text-sm text-[#8A7F63] py-8 text-center">Nothing in this stage right now.</p>
+                  ) : (
+                    filtered.map((e) => <StockListRow key={e.id} item={e} onOpen={openItem} />)
+                  )}
+                </div>
               </>
             );
           })()}
@@ -1238,6 +1376,33 @@ export default function Home() {
             {selectedItem.status === "ready" && editDraft && (
               <>
                 <ListingHelper item={selectedItem} />
+
+                {(selectedItem.vinted_price_low != null || selectedItem.demand || selectedItem.listing_recommendation) && (
+                  <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-3 mb-5">
+                    <p className="text-xs text-[#8A7F63] uppercase tracking-wide mb-2">Pricing intelligence</p>
+                    <div className="flex flex-wrap gap-x-6 gap-y-2 font-mono text-sm mb-2">
+                      <div>
+                        <span className="text-[#8A7F63] text-xs block">eBay est.</span>
+                        <span>£{selectedItem.price_low}–£{selectedItem.price_high}</span>
+                      </div>
+                      {selectedItem.vinted_price_low != null && (
+                        <div>
+                          <span className="text-[#8A7F63] text-xs block">Vinted est.</span>
+                          <span>£{selectedItem.vinted_price_low}–£{selectedItem.vinted_price_high}</span>
+                        </div>
+                      )}
+                      {selectedItem.demand && (
+                        <div>
+                          <span className="text-[#8A7F63] text-xs block">Demand</span>
+                          <span className="capitalize">{selectedItem.demand}</span>
+                        </div>
+                      )}
+                    </div>
+                    {selectedItem.listing_recommendation && (
+                      <p className="text-sm text-[#2B2620]">{selectedItem.listing_recommendation}</p>
+                    )}
+                  </div>
+                )}
 
                 <ListedToggles item={selectedItem} onToggle={togglePlatform} />
 
