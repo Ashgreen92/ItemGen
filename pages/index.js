@@ -111,17 +111,39 @@ function SunflowerIcon({ size = 16, className = "" }) {
   );
 }
 
-function StatusBadge({ status }) {
+function StatusBadge({ item }) {
+  const status = item.status;
   const map = {
-    processing: { label: "Processing", cls: "bg-[#A9822E]/15 text-[#A9822E] border-[#A9822E]/30" },
-    needs_size: { label: "Needs size", cls: "bg-[#A63A2E]/15 text-[#A63A2E] border-[#A63A2E]/30" },
-    ready: { label: "Ready", cls: "bg-[#3F5E42]/15 text-[#3F5E42] border-[#3F5E42]/30" },
-    error: { label: "Failed", cls: "bg-[#A63A2E]/15 text-[#A63A2E] border-[#A63A2E]/30" },
-    sold: { label: "Sold", cls: "bg-[#8A7F63]/15 text-[#6B6250] border-[#8A7F63]/30" },
+    processing: { label: "Processing", cls: "bg-[#A9822E] text-white" },
+    needs_size: { label: "Needs size", cls: "bg-[#A63A2E] text-white" },
+    error: { label: "Failed", cls: "bg-[#A63A2E] text-white" },
   };
+
+  if (status === "sold") {
+    const s = item.payment_received
+      ? { label: "Sold", cls: "bg-[#3F5E42] text-white" }
+      : { label: "Payment due", cls: "bg-[#A9822E] text-white" };
+    return (
+      <span className={`inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm ${s.cls}`}>
+        {s.label}
+      </span>
+    );
+  }
+
+  if (status === "ready") {
+    const platforms = [item.ebay_listed && "eBay", item.vinted_listed && "Vinted", item.depop_listed && "Depop"].filter(Boolean);
+    const label = platforms.length ? platforms.join(" + ") : "Ready";
+    const cls = platforms.length ? "bg-[#3F5E42] text-white" : "bg-[#8A7F63] text-white";
+    return (
+      <span className={`inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm ${cls}`}>
+        {label}
+      </span>
+    );
+  }
+
   const s = map[status] || map.processing;
   return (
-    <span className={`inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm border ${s.cls}`}>
+    <span className={`inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm ${s.cls}`}>
       {status === "processing" && <Loader2 size={11} className="animate-spin" />}
       {s.label}
     </span>
@@ -215,11 +237,17 @@ function ListedToggles({ item, onToggle }) {
   );
 }
 const PIPELINE_STAGES = {
-  not_listed: { label: "Not listed yet", cls: "bg-[#8A7F63]/15 text-[#6B6250] border-[#8A7F63]/30" },
-  early: { label: "On eBay, early days", cls: "bg-[#3F5E42]/15 text-[#3F5E42] border-[#3F5E42]/30" },
-  add_vinted: { label: "Add Vinted now", cls: "bg-[#A9822E]/15 text-[#A9822E] border-[#A9822E]/30" },
-  cut_price: { label: "Cut Vinted price", cls: "bg-[#A63A2E]/15 text-[#A63A2E] border-[#A63A2E]/30" },
-  bundle: { label: "Bundle candidate", cls: "bg-[#A63A2E]/15 text-[#A63A2E] border-[#A63A2E]/30" },
+  not_listed: { label: "Not listed yet" },
+  ebay: { label: "Listed on eBay (0-7 Days)" },
+  vinted: { label: "Listed on Vinted (7-21 Days)" },
+  reduced: { label: "Reduced on Vinted (21-90 Days)" },
+  relist: { label: "Relist (90 Days+)" },
+};
+
+const FLAG_STYLES = {
+  none: { badge: "", card: "bg-[#F7F3E8] border-[#C9BFA3]" },
+  orange: { badge: "bg-[#A9822E] text-white", card: "bg-[#A9822E]/15 border-[#A9822E]" },
+  red: { badge: "bg-[#A63A2E] text-white", card: "bg-[#A63A2E]/15 border-[#A63A2E]" },
 };
 
 function daysSince(iso) {
@@ -227,18 +255,35 @@ function daysSince(iso) {
   return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
 }
 
+// Figures out where an item sits in the eBay -> Vinted -> reduce -> relist cycle,
+// and whether the next expected action is on-track, due, or overdue - based on
+// whether that action was actually confirmed (a toggle/button), not just elapsed time.
 function getPipelineInfo(item) {
   if (item.status !== "ready") return null;
-  const ebayDays = daysSince(item.ebay_listed_at);
-  const vintedDays = daysSince(item.vinted_listed_at);
-  if (ebayDays === null && vintedDays === null) return { stage: "not_listed", days: null };
 
-  const firstDays = [ebayDays, vintedDays].filter((d) => d !== null).sort((a, b) => b - a)[0];
+  const firstListedAt = [item.ebay_listed_at, item.vinted_listed_at].filter(Boolean).sort()[0];
+  if (!firstListedAt) return { stage: "not_listed", days: null, flag: "none" };
 
-  if (firstDays >= 35) return { stage: "bundle", days: firstDays };
-  if (firstDays >= 21) return { stage: "cut_price", days: firstDays };
-  if (firstDays >= 7 && vintedDays === null) return { stage: "add_vinted", days: firstDays };
-  return { stage: "early", days: firstDays };
+  const daysActive = daysSince(firstListedAt);
+
+  // Each checkpoint: the day an action is due, and whether it's been confirmed.
+  const checkpoints = [
+    { dueDay: 7, done: !!item.vinted_listed_at, stageIfNotDone: "ebay" },
+    { dueDay: 21, done: !!item.vinted_reduced_at, stageIfNotDone: "vinted" },
+    { dueDay: 90, done: !!item.relisted_at, stageIfNotDone: "reduced" },
+  ];
+
+  for (const cp of checkpoints) {
+    if (daysActive >= cp.dueDay && !cp.done) {
+      const daysOverdue = daysActive - cp.dueDay;
+      return { stage: cp.stageIfNotDone, days: daysActive, flag: daysOverdue > 7 ? "red" : "orange" };
+    }
+  }
+
+  if (daysActive < 7) return { stage: "ebay", days: daysActive, flag: "none" };
+  if (daysActive < 21) return { stage: "vinted", days: daysActive, flag: "none" };
+  if (daysActive < 90) return { stage: "reduced", days: daysActive, flag: "none" };
+  return { stage: "relist", days: daysActive, flag: "none" };
 }
 
 function timeAgo(iso) {
@@ -258,18 +303,22 @@ function StockListRow({ item: e, onOpen }) {
   const isListed = e.ebay_listed || e.vinted_listed || e.depop_listed;
   const thumb = e.photos?.[0] || e.thumbnail;
   const pipeline = getPipelineInfo(e);
-  const stageInfo = pipeline && pipeline.stage !== "not_listed" && pipeline.stage !== "early" ? PIPELINE_STAGES[pipeline.stage] : null;
+  const flagStyle = pipeline ? FLAG_STYLES[pipeline.flag] : FLAG_STYLES.none;
+  const cardCls =
+    e.status === "sold" && !e.payment_received
+      ? FLAG_STYLES.orange.card
+      : isListed && pipeline?.flag === "none"
+      ? "bg-[#3F5E42]/10 border-[#3F5E42]/40"
+      : flagStyle.card;
 
   return (
     <button
       onClick={() => onOpen(e)}
-      className={`w-full flex items-center gap-3 text-left rounded-sm border p-2.5 transition active:scale-[0.99] ${
-        isListed ? "bg-[#3F5E42]/8 border-[#3F5E42]/40" : "bg-[#F7F3E8] border-[#C9BFA3]"
-      }`}
+      className={`w-full flex items-center gap-3 text-left rounded-sm border p-2.5 transition active:scale-[0.99] ${cardCls}`}
     >
       <div className="w-20 h-20 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0 relative">
         {thumb && <img src={thumb} alt="" className="w-full h-full object-cover" />}
-        {e.status === "sold" && (
+        {e.status === "sold" && e.payment_received && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ mixBlendMode: "multiply" }}>
             <span className="text-[#A63A2E] border-2 border-[#A63A2E] px-1.5 py-0.5 -rotate-12 font-mono font-bold text-[10px] tracking-widest uppercase opacity-90">
               Sold
@@ -282,16 +331,18 @@ function StockListRow({ item: e, onOpen }) {
         <div className="font-medium text-sm truncate">{e.title}</div>
         <div className="text-xs text-[#8A7F63] mt-0.5">Added {timeAgo(e.created_at)}</div>
         <div className="flex items-center gap-2 flex-wrap mt-1.5">
-          <StatusBadge status={e.status} />
+          <StatusBadge item={e} />
           {e.status === "sold" && e.sale_price != null && (
-            <span className="text-[#3F5E42] font-mono font-semibold text-sm">Sold £{e.sale_price}</span>
+            <span className="text-[#3F5E42] font-mono font-semibold text-sm">£{e.sale_price}</span>
           )}
           <span className="text-xs font-mono text-[#8A7F63]">
             #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
           </span>
-          {stageInfo && (
-            <span className={`inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm border ${stageInfo.cls}`}>
-              {stageInfo.label} · Day {pipeline.days}
+          {pipeline && pipeline.stage !== "not_listed" && (
+            <span className={`inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm ${
+              pipeline.flag === "none" ? "bg-[#8A7F63]/15 text-[#6B6250]" : flagStyle.badge
+            }`}>
+              {PIPELINE_STAGES[pipeline.stage].label} · Day {pipeline.days}
             </span>
           )}
           {isListed && (
@@ -308,6 +359,9 @@ function StockListRow({ item: e, onOpen }) {
             </div>
           )}
         </div>
+        {e.status === "sold" && !e.payment_received && (
+          <span className="text-xs text-[#A9822E] font-medium">Awaiting payment</span>
+        )}
       </div>
 
       <span className="text-[#8A7F63] text-lg shrink-0">›</span>
@@ -797,6 +851,20 @@ export default function Home() {
     fetchItems();
   };
 
+  const confirmPipelineAction = async (item, field) => {
+    const now = new Date().toISOString();
+    await supabase.from("items").update({ [field]: now }).eq("id", item.id);
+    setSelectedItem({ ...item, [field]: now });
+    fetchItems();
+  };
+
+  const confirmPaymentReceived = async (item) => {
+    const now = new Date().toISOString();
+    await supabase.from("items").update({ payment_received: true, payment_received_at: now }).eq("id", item.id);
+    setSelectedItem({ ...item, payment_received: true, payment_received_at: now });
+    fetchItems();
+  };
+
   const removeItem = async (id) => {
     await supabase.from("items").delete().eq("id", id);
     fetchItems();
@@ -838,7 +906,7 @@ export default function Home() {
             onClick={() => setView("pipeline")}
             className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "pipeline" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
           >
-            Pipeline
+            Item Status
           </button>
         </div>
       </div>
@@ -917,7 +985,7 @@ export default function Home() {
                             {e.thumbnail && <img src={e.thumbnail} alt="" className="w-full h-full object-cover" />}
                           </div>
                           <span className="text-sm truncate flex-1">{e.title}</span>
-                          <StatusBadge status={e.status} />
+                          <StatusBadge item={e} />
                         </button>
                       ))}
                     </div>
@@ -946,12 +1014,16 @@ export default function Home() {
             const withStage = items
               .filter((e) => e.status === "ready")
               .map((e) => ({ ...e, _pipeline: getPipelineInfo(e) }));
+            const paymentDue = items.filter((e) => e.status === "sold" && !e.payment_received);
+            const outstanding = withStage.filter((e) => e._pipeline?.flag !== "none");
 
-            const filtered = withStage.filter((e) =>
-              pipelineFilter === "all" ? true : e._pipeline?.stage === pipelineFilter
-            );
+            let filtered;
+            if (pipelineFilter === "outstanding") filtered = outstanding;
+            else if (pipelineFilter === "payment_due") filtered = paymentDue;
+            else if (pipelineFilter === "all") filtered = withStage;
+            else filtered = withStage.filter((e) => e._pipeline?.stage === pipelineFilter);
 
-            // bundle suggestions: same category + size, not sold, count >= 2
+            // bundle suggestions: same category + size, count >= 2
             const groups = {};
             withStage.forEach((e) => {
               if (!e.category || !e.size) return;
@@ -969,27 +1041,39 @@ export default function Home() {
 
             return (
               <>
-                <p className="font-serif text-2xl mb-1">Pipeline</p>
+                <p className="font-serif text-2xl mb-1">Item Status</p>
                 <p className="text-sm text-[#8A7F63] mb-5">
-                  Where each active listing sits in the eBay → Vinted → price-cut cycle.
+                  Where each active listing sits in the eBay → Vinted → reduce → relist cycle.
                 </p>
 
                 <div className="flex flex-wrap gap-2 mb-5">
                   <button
                     onClick={() => setPipelineFilter("all")}
-                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === "all" ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"}`}
+                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === "all" ? "bg-[#A9822E] border-[#A9822E] text-white" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"}`}
                   >
                     All ({withStage.length})
                   </button>
-                  {Object.entries(PIPELINE_STAGES).map(([key, s]) => (
+                  {Object.entries(PIPELINE_STAGES).filter(([key]) => key !== "not_listed").map(([key, s]) => (
                     <button
                       key={key}
                       onClick={() => setPipelineFilter(key)}
-                      className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === key ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"}`}
+                      className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === key ? "bg-[#A9822E] border-[#A9822E] text-white" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"}`}
                     >
                       {s.label} ({stageCounts[key] || 0})
                     </button>
                   ))}
+                  <button
+                    onClick={() => setPipelineFilter("outstanding")}
+                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === "outstanding" ? "bg-[#A63A2E] border-[#A63A2E] text-white" : "bg-[#A63A2E]/10 border-[#A63A2E]/40 text-[#A63A2E]"}`}
+                  >
+                    Outstanding ({outstanding.length})
+                  </button>
+                  <button
+                    onClick={() => setPipelineFilter("payment_due")}
+                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === "payment_due" ? "bg-[#A9822E] border-[#A9822E] text-white" : "bg-[#A9822E]/10 border-[#A9822E]/40 text-[#A9822E]"}`}
+                  >
+                    Payment due ({paymentDue.length})
+                  </button>
                 </div>
 
                 {bundleSuggestions.length > 0 && (
@@ -1022,7 +1106,7 @@ export default function Home() {
 
                 <div className="flex flex-col gap-2">
                   {filtered.length === 0 ? (
-                    <p className="text-sm text-[#8A7F63] py-8 text-center">Nothing in this stage right now.</p>
+                    <p className="text-sm text-[#8A7F63] py-8 text-center">Nothing here right now.</p>
                   ) : (
                     filtered.map((e) => <StockListRow key={e.id} item={e} onOpen={openItem} />)
                   )}
@@ -1248,7 +1332,7 @@ export default function Home() {
             <DownloadablePhotos item={selectedItem} saveDirHandle={saveDirHandle} onChooseFolder={chooseSaveFolder} />
 
             <div className="mb-3">
-              <StatusBadge status={selectedItem.status} />
+              <StatusBadge item={selectedItem} />
             </div>
 
             {selectedItem.status === "processing" && (
@@ -1275,7 +1359,7 @@ export default function Home() {
 
             {selectedItem.status === "sold" && (
               <div className="flex flex-col gap-4">
-                <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-4">
+                <div className={`rounded-sm border p-4 ${selectedItem.payment_received ? "bg-[#F7F3E8] border-[#C9BFA3]" : "bg-[#A9822E]/15 border-[#A9822E]"}`}>
                   <p className="text-sm text-[#2B2620] font-medium mb-3">{selectedItem.title}</p>
                   <div className="flex flex-wrap gap-x-6 gap-y-2 font-mono text-sm">
                     <div>
@@ -1292,8 +1376,23 @@ export default function Home() {
                         <span className="text-[#3F5E42] font-bold">£{(selectedItem.sale_price - selectedItem.cost_price).toFixed(2)}</span>
                       </div>
                     )}
+                    <div>
+                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Payment</span>
+                      <span className={selectedItem.payment_received ? "text-[#3F5E42] font-bold" : "text-[#A9822E] font-bold"}>
+                        {selectedItem.payment_received ? "Received" : "Outstanding"}
+                      </span>
+                    </div>
                   </div>
                 </div>
+                {!selectedItem.payment_received && (
+                  <button
+                    onClick={() => confirmPaymentReceived(selectedItem)}
+                    className="w-full py-2.5 rounded bg-[#A9822E] text-white font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
+                  >
+                    <Check size={15} />
+                    Confirm payment received
+                  </button>
+                )}
                 <button
                   onClick={() => unmarkSold(selectedItem)}
                   className="w-full py-2.5 rounded bg-[#DCD4BC] text-[#2B2620] font-medium flex items-center justify-center gap-2 active:scale-[0.98] transition"
@@ -1419,6 +1518,45 @@ export default function Home() {
                 )}
 
                 <ListedToggles item={selectedItem} onToggle={togglePlatform} />
+
+                {(() => {
+                  const pipeline = getPipelineInfo(selectedItem);
+                  if (!pipeline || pipeline.stage === "not_listed") return null;
+                  const flagStyle = FLAG_STYLES[pipeline.flag];
+                  return (
+                    <div className={`rounded-sm border p-3 mb-5 ${pipeline.flag === "none" ? "bg-[#F7F3E8] border-[#C9BFA3]" : flagStyle.card}`}>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs text-[#8A7F63] uppercase tracking-wide">
+                          {PIPELINE_STAGES[pipeline.stage].label} · Day {pipeline.days}
+                        </span>
+                        {pipeline.flag !== "none" && (
+                          <span className={`text-[10px] font-mono uppercase px-1.5 py-0.5 rounded-sm ${flagStyle.badge}`}>
+                            {pipeline.flag === "red" ? "Overdue" : "Due"}
+                          </span>
+                        )}
+                      </div>
+                      {pipeline.stage === "ebay" && !selectedItem.vinted_listed_at && (
+                        <p className="text-sm">Add it to Vinted (toggle above) at a reduced price.</p>
+                      )}
+                      {pipeline.stage === "vinted" && !selectedItem.vinted_reduced_at && (
+                        <button
+                          onClick={() => confirmPipelineAction(selectedItem, "vinted_reduced_at")}
+                          className="w-full mt-1 py-2.5 rounded bg-[#A9822E] text-white font-bold text-sm"
+                        >
+                          Confirm Vinted price reduced
+                        </button>
+                      )}
+                      {pipeline.stage === "reduced" && !selectedItem.relisted_at && (
+                        <button
+                          onClick={() => confirmPipelineAction(selectedItem, "relisted_at")}
+                          className="w-full mt-1 py-2.5 rounded bg-[#A9822E] text-white font-bold text-sm"
+                        >
+                          Confirm relisted / bundled
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {selectedItem.verify_before_listing?.length > 0 && (
                   <div className="bg-[#A63A2E]/10 border border-[#A63A2E]/30 rounded-sm p-3 mb-5">
