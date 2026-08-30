@@ -79,10 +79,11 @@ function autoEnhance(dataUrl) {
           }
           const avgR = sumR / n, avgG = sumG / n, avgB = sumB / n;
           const avgGray = (avgR + avgG + avgB) / 3;
-          const wbStrength = 0.5;
-          const rScale = 1 + wbStrength * (avgGray / (avgR || 1) - 1);
-          const gScale = 1 + wbStrength * (avgGray / (avgG || 1) - 1);
-          const bScale = 1 + wbStrength * (avgGray / (avgB || 1) - 1);
+          const wbStrength = 0.25;
+          const clamp = (v) => Math.max(0.9, Math.min(1.1, v));
+          const rScale = clamp(1 + wbStrength * (avgGray / (avgR || 1) - 1));
+          const gScale = clamp(1 + wbStrength * (avgGray / (avgG || 1) - 1));
+          const bScale = clamp(1 + wbStrength * (avgGray / (avgB || 1) - 1));
 
           // Percentile-based contrast/exposure stretch (1st-99th percentile),
           // blended at 60% so shadows/highlights aren't crushed or blown out
