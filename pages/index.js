@@ -125,7 +125,9 @@ function autoEnhance(dataUrl) {
 }
 
 function estimateBytes(dataUrl) {
-  return Math.round(dataUrl.length * 0.75);
+  // This measures the size of the text actually sent over the wire (as JSON),
+  // not decoded binary size - no base64 conversion factor needed here.
+  return dataUrl.length;
 }
 
 async function ensureUnderSizeLimit(photos, maxTotalBytes = 3200000) {
