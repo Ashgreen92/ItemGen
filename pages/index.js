@@ -148,9 +148,9 @@ function StatusBadge({ item }) {
   };
 
   if (status === "sold") {
-    const s = item.payment_received
-      ? { label: "Sold", cls: "bg-[#3F5E42] text-white" }
-      : { label: "Payment due", cls: "bg-[#A9822E] text-white" };
+    const info = getSoldInfo(item);
+    const colorMap = { none: "bg-[#3F5E42] text-white", orange: "bg-[#A9822E] text-white", red: "bg-[#A63A2E] text-white" };
+    const s = { label: info.label, cls: colorMap[info.flag] };
     return (
       <span className={`inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm ${s.cls}`}>
         {s.label}
@@ -283,6 +283,20 @@ function daysSince(iso) {
   return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
 }
 
+// Post-sale lifecycle: payment due -> awaiting posting -> fully done.
+// "Awaiting posting" is due the instant payment is confirmed, turning red after 2 days.
+function getSoldInfo(item) {
+  if (item.status !== "sold") return null;
+  if (!item.payment_received) {
+    return { stage: "payment_due", flag: "orange", label: "Payment due", days: null };
+  }
+  if (!item.posted_at) {
+    const days = daysSince(item.payment_received_at) ?? 0;
+    return { stage: "awaiting_posting", flag: days >= 2 ? "red" : "orange", label: "Awaiting posting", days };
+  }
+  return { stage: "posted", flag: "none", label: "Sold", days: null };
+}
+
 // Figures out where an item sits in the eBay -> Vinted -> reduce -> relist cycle,
 // and whether the next expected action is on-track, due, or overdue - based on
 // whether that action was actually confirmed (a toggle/button), not just elapsed time.
@@ -331,10 +345,11 @@ function StockListRow({ item: e, onOpen }) {
   const isListed = e.ebay_listed || e.vinted_listed || e.depop_listed;
   const thumb = e.photos?.[0] || e.thumbnail;
   const pipeline = getPipelineInfo(e);
+  const soldInfo = getSoldInfo(e);
   const flagStyle = pipeline ? FLAG_STYLES[pipeline.flag] : FLAG_STYLES.none;
   const cardCls =
-    e.status === "sold" && !e.payment_received
-      ? FLAG_STYLES.orange.card
+    soldInfo && soldInfo.flag !== "none"
+      ? FLAG_STYLES[soldInfo.flag].card
       : isListed && pipeline?.flag === "none"
       ? "bg-[#3F5E42]/10 border-[#3F5E42]/40"
       : flagStyle.card;
@@ -346,7 +361,7 @@ function StockListRow({ item: e, onOpen }) {
     >
       <div className="w-20 h-20 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0 relative">
         {thumb && <img src={thumb} alt="" className="w-full h-full object-cover" />}
-        {e.status === "sold" && e.payment_received && (
+        {soldInfo?.stage === "posted" && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ mixBlendMode: "multiply" }}>
             <span className="text-[#A63A2E] border-2 border-[#A63A2E] px-1.5 py-0.5 -rotate-12 font-mono font-bold text-[10px] tracking-widest uppercase opacity-90">
               Sold
@@ -387,8 +402,13 @@ function StockListRow({ item: e, onOpen }) {
             </div>
           )}
         </div>
-        {e.status === "sold" && !e.payment_received && (
+        {soldInfo?.stage === "payment_due" && (
           <span className="text-xs text-[#A9822E] font-medium">Awaiting payment</span>
+        )}
+        {soldInfo?.stage === "awaiting_posting" && (
+          <span className={`text-xs font-medium ${soldInfo.flag === "red" ? "text-[#A63A2E]" : "text-[#A9822E]"}`}>
+            Needs posting{soldInfo.days > 0 ? ` · ${soldInfo.days}d` : ""}
+          </span>
         )}
       </div>
 
@@ -1044,11 +1064,17 @@ export default function Home() {
               .filter((e) => e.status === "ready")
               .map((e) => ({ ...e, _pipeline: getPipelineInfo(e) }));
             const paymentDue = items.filter((e) => e.status === "sold" && !e.payment_received);
-            const outstanding = withStage.filter((e) => e._pipeline?.flag !== "none");
+            const needsPosting = items.filter((e) => e.status === "sold" && e.payment_received && !e.posted_at);
+            const outstanding = [
+              ...withStage.filter((e) => e._pipeline?.flag !== "none"),
+              ...paymentDue,
+              ...needsPosting,
+            ];
 
             let filtered;
             if (pipelineFilter === "outstanding") filtered = outstanding;
             else if (pipelineFilter === "payment_due") filtered = paymentDue;
+            else if (pipelineFilter === "needs_posting") filtered = needsPosting;
             else if (pipelineFilter === "all") filtered = withStage;
             else filtered = withStage.filter((e) => e._pipeline?.stage === pipelineFilter);
 
@@ -1072,7 +1098,7 @@ export default function Home() {
               <>
                 <p className="font-serif text-2xl mb-1">Item Status</p>
                 <p className="text-sm text-[#8A7F63] mb-5">
-                  
+                  Where each active listing sits in the eBay → Vinted → reduce → relist cycle.
                 </p>
 
                 <div className="flex flex-wrap gap-2 mb-5">
@@ -1102,6 +1128,12 @@ export default function Home() {
                     className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === "payment_due" ? "bg-[#A9822E] border-[#A9822E] text-white" : "bg-[#A9822E]/10 border-[#A9822E]/40 text-[#A9822E]"}`}
                   >
                     Payment due ({paymentDue.length})
+                  </button>
+                  <button
+                    onClick={() => setPipelineFilter("needs_posting")}
+                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === "needs_posting" ? "bg-[#A9822E] border-[#A9822E] text-white" : "bg-[#A9822E]/10 border-[#A9822E]/40 text-[#A9822E]"}`}
+                  >
+                    Awaiting posting ({needsPosting.length})
                   </button>
                 </div>
 
@@ -1443,6 +1475,14 @@ export default function Home() {
                         {selectedItem.payment_received ? "Received" : "Outstanding"}
                       </span>
                     </div>
+                    {selectedItem.payment_received && (
+                      <div>
+                        <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Posting</span>
+                        <span className={selectedItem.posted_at ? "text-[#3F5E42] font-bold" : "text-[#A9822E] font-bold"}>
+                          {selectedItem.posted_at ? "Posted" : "Needs posting"}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
                 {!selectedItem.payment_received && (
@@ -1452,6 +1492,15 @@ export default function Home() {
                   >
                     <Check size={15} />
                     Confirm payment received
+                  </button>
+                )}
+                {selectedItem.payment_received && !selectedItem.posted_at && (
+                  <button
+                    onClick={() => confirmPipelineAction(selectedItem, "posted_at")}
+                    className="w-full py-2.5 rounded bg-[#A9822E] text-white font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
+                  >
+                    <Check size={15} />
+                    Confirm item posted
                   </button>
                 )}
                 <button
