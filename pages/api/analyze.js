@@ -6,7 +6,7 @@ const QUICK_PROMPT = `Look at these photos of a single secondhand item. Answer O
   "search_query": "a short, accurate eBay search phrase for this item - brand + item type + any distinguishing detail visible (e.g. 'Nike Air Max 90 trainers mens', 'Emporio Armani navy t-shirt'). No fluff, no size/condition words, just what a buyer would type to find this item."
 }`;
 
-function buildFullPrompt(confirmedFields, ebayListingsBlock) {
+function buildFullPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings) {
   const cf = confirmedFields || {};
   let factsNote = "";
   const lines = [];
@@ -18,12 +18,16 @@ function buildFullPrompt(confirmedFields, ebayListingsBlock) {
     factsNote = `\n\nThe seller has personally corrected/confirmed the following - treat these as verified fact, not something to guess or second-guess, and write the title/description consistent with them:\n- ${lines.join("\n- ")}`;
   }
 
+  const totalNote = ebayTotalListings != null
+    ? ` eBay reports approximately ${ebayTotalListings} total active listings currently matching this search - a high number suggests a competitive/saturated market, a low number suggests this is a more niche item; factor this into your demand read.`
+    : "";
+
   const pricingStep = ebayListingsBlock
     ? `Step 2: Below are REAL current eBay UK active listings for this item, retrieved directly from eBay's own API (not a web search) - these are genuine, live comparable items:
 
 ${ebayListingsBlock}
 
-Use these as your primary basis for estimated_price_low/estimated_price_high. These are active asking prices, not confirmed sold prices, so still price toward the lower third of what you see rather than the middle or top - sellers list high and negotiate down. If the results above don't look like genuine matches for this item, say so in notes and fall back to your own judgement with lower confidence.
+Use these as your primary basis for estimated_price_low/estimated_price_high. These are active asking prices, not confirmed sold prices, so still price toward the lower third of what you see rather than the middle or top - sellers list high and negotiate down. If the results above don't look like genuine matches for this item, say so in notes and fall back to your own judgement with lower confidence.${totalNote}
 
 You also have exactly ONE web search available - use it specifically to check Vinted UK for what this item goes for there, since Vinted has no API. Also use whatever you see (in the eBay data above and your Vinted search) to judge demand: many results / recent activity = high demand, few or stale results = low demand.`
     : `Step 2: You have exactly ONE web search available - use it wisely. Search eBay UK and/or Vinted for comparable items (same or similar brand/model/condition) to see what they're actually selling for right now, on BOTH platforms if your search results cover both. Prioritize sold/completed listings over active asking prices — active listings on both platforms are consistently priced above what items actually sell for, since sellers list high and negotiate down or wait for offers. If your search only turns up active asking prices, treat those as a ceiling, not a target: price toward the lower third of that range rather than the middle or top. Do not guess any price from memory — base it on what you find in search, and err conservative rather than optimistic. Also note roughly how much genuine buyer interest/turnover you saw for this kind of item (many recent sold listings = high demand; mostly old unsold active listings = low demand) - this feeds the "demand" field below.`;
@@ -107,26 +111,28 @@ async function searchEbay(query, token) {
   });
   if (!res.ok) {
     console.error("eBay search failed:", await res.text());
-    return [];
+    return { results: [], total: null };
   }
   const data = await res.json();
-  return (data.itemSummaries || []).map((item) => ({
+  const results = (data.itemSummaries || []).map((item) => ({
     title: item.title,
     price: item.price ? `£${item.price.value}` : "?",
     condition: item.condition || "unknown",
   }));
+  return { results, total: typeof data.total === "number" ? data.total : null };
 }
 
-async function getEbayListingsBlock(query) {
+async function getEbayMarketData(query) {
   try {
     const token = await getEbayToken();
-    if (!token) return null;
-    const results = await searchEbay(query, token);
-    if (results.length === 0) return null;
-    return results.map((r) => `- "${r.title}" - ${r.price} (${r.condition})`).join("\n");
+    if (!token) return { block: null, total: null };
+    const { results, total } = await searchEbay(query, token);
+    if (results.length === 0) return { block: null, total };
+    const block = results.map((r) => `- "${r.title}" - ${r.price} (${r.condition})`).join("\n");
+    return { block, total };
   } catch (err) {
     console.error("eBay Browse API lookup failed:", err);
-    return null;
+    return { block: null, total: null };
   }
 }
 
@@ -163,11 +169,14 @@ export default async function handler(req, res) {
     const isQuick = mode === "quick";
 
     let ebayListingsBlock = null;
+    let ebayTotalListings = null;
     if (!isQuick && ebaySearchQuery) {
-      ebayListingsBlock = await getEbayListingsBlock(ebaySearchQuery);
+      const marketData = await getEbayMarketData(ebaySearchQuery);
+      ebayListingsBlock = marketData.block;
+      ebayTotalListings = marketData.total;
     }
 
-    const promptText = isQuick ? QUICK_PROMPT : buildFullPrompt(confirmedFields, ebayListingsBlock);
+    const promptText = isQuick ? QUICK_PROMPT : buildFullPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings);
 
     const body = {
       model: "claude-sonnet-5",
@@ -217,6 +226,7 @@ export default async function handler(req, res) {
     }
     if (!isQuick) {
       result._usedRealEbayData = !!ebayListingsBlock;
+      result._ebayTotalListings = ebayTotalListings;
     }
     return res.status(200).json(result);
   } catch (err) {
