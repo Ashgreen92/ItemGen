@@ -160,7 +160,7 @@ function StatusBadge({ item }) {
 
   if (status === "ready") {
     const platforms = [item.ebay_listed && "eBay", item.vinted_listed && "Vinted", item.depop_listed && "Depop"].filter(Boolean);
-    const label = platforms.length ? platforms.join(" + ") : "Ready";
+    const label = platforms.length ? platforms.join(" + ") : "Unlisted";
     const cls = platforms.length ? "bg-[#3F5E42] text-white" : "bg-[#8A7F63] text-white";
     return (
       <span className={`inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm ${cls}`}>
@@ -1072,7 +1072,8 @@ export default function Home() {
               <>
                 <p className="font-serif text-2xl mb-1">Item Status</p>
                 <p className="text-sm text-[#8A7F63] mb-5">
-                                </p>
+                  
+                </p>
 
                 <div className="flex flex-wrap gap-2 mb-5">
                   <button
@@ -1081,7 +1082,7 @@ export default function Home() {
                   >
                     All ({withStage.length})
                   </button>
-                  {Object.entries(PIPELINE_STAGES).filter(([key]) => key !== "not_listed").map(([key, s]) => (
+                  {Object.entries(PIPELINE_STAGES).map(([key, s]) => (
                     <button
                       key={key}
                       onClick={() => setPipelineFilter(key)}
