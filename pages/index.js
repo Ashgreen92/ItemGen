@@ -745,7 +745,12 @@ export default function Home() {
   }, []);
 
   const fetchItems = useCallback(async () => {
-    const { data, error } = await supabase.from("items").select("*").order("created_at", { ascending: false });
+    const { data, error } = await supabase
+      .from("items")
+      .select(
+        "id, title, description, category, condition, brand, price_low, price_high, confidence, notes, status, thumbnail, created_at, sale_price, cost_price, ebay_listed, vinted_listed, depop_listed, verify_before_listing, batch, ebay_listed_at, vinted_listed_at, depop_listed_at, size, size_applicable, vinted_price_low, vinted_price_high, demand, listing_recommendation, error_detail, ebay_search_query, used_real_ebay_data, ebay_active_listings, vinted_reduced_at, relisted_at, payment_received, payment_received_at, posted_at"
+      )
+      .order("created_at", { ascending: false });
     if (!error && data) setItems(data);
     setLoadedItems(true);
   }, []);
@@ -869,11 +874,20 @@ export default function Home() {
     }
   };
 
-  const openItem = (item) => {
+  const openItem = async (item) => {
     setSelectedItem(item);
     setEditDraft(item);
     setEditing(false);
     setSizeGateInput("");
+    try {
+      const { data, error } = await supabase.from("items").select("*").eq("id", item.id).single();
+      if (!error && data) {
+        setSelectedItem(data);
+        setEditDraft(data);
+      }
+    } catch (err) {
+      console.error("Failed to load item photos:", err);
+    }
   };
   const closeItem = () => {
     setSelectedItem(null);
