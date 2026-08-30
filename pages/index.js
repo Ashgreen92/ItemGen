@@ -747,7 +747,18 @@ export default function Home() {
   }, []);
 
   const fetchItems = useCallback(async () => {
-    const { data, error } = await supabase.from("items").select("*").order("created_at", { ascending: false });
+    const leanColumns =
+      "id, title, thumbnail, status, sale_price, cost_price, created_at, category, size, batch, ebay_listed, vinted_listed, depop_listed, ebay_listed_at, vinted_listed_at, vinted_reduced_at, relisted_at, payment_received, payment_received_at, posted_at";
+
+    let { data, error } = await supabase.from("items").select(leanColumns).order("created_at", { ascending: false });
+
+    if (error) {
+      console.error("Lean fetchItems failed, falling back to full select:", error);
+      const fallback = await supabase.from("items").select("*").order("created_at", { ascending: false });
+      data = fallback.data;
+      error = fallback.error;
+    }
+
     if (error) console.error("fetchItems failed:", error);
     if (!error && data) setItems(data);
     setLoadedItems(true);
