@@ -207,8 +207,13 @@ export default async function handler(req, res) {
 
     if (!response.ok) {
       const detail = await response.text();
-      console.error("Anthropic API error:", detail);
-      return res.status(502).json({ error: "AI request failed" });
+      console.error("Anthropic API error:", response.status, detail);
+      let reason = detail.slice(0, 200);
+      try {
+        const parsed = JSON.parse(detail);
+        reason = parsed?.error?.message || reason;
+      } catch {}
+      return res.status(502).json({ error: `AI request failed (Anthropic HTTP ${response.status}: ${reason})` });
     }
 
     const data = await response.json();
