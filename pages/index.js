@@ -79,8 +79,8 @@ async function ensureUnderSizeLimit(photos, maxTotalBytes = 3200000) {
   return current;
 }
 
-async function analyzeItem(photos, mode, confirmedFields) {
-  const bodyStr = JSON.stringify({ photos, mode, confirmedFields });
+async function analyzeItem(photos, mode, confirmedFields, ebaySearchQuery) {
+  const bodyStr = JSON.stringify({ photos, mode, confirmedFields, ebaySearchQuery });
   const res = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -604,10 +604,10 @@ export default function Home() {
     }
   };
 
-  const runFullGeneration = useCallback(async (id, photos, confirmedFields) => {
+  const runFullGeneration = useCallback(async (id, photos, confirmedFields, ebaySearchQuery) => {
     try {
       const safePhotos = await ensureUnderSizeLimit(photos);
-      const result = await analyzeItem(safePhotos, "full", confirmedFields || null);
+      const result = await analyzeItem(safePhotos, "full", confirmedFields || null, ebaySearchQuery || null);
       await supabase
         .from("items")
         .update({
@@ -625,6 +625,7 @@ export default function Home() {
           vinted_price_high: result.vinted_price_high ?? null,
           demand: result.demand || null,
           listing_recommendation: result.listing_recommendation || null,
+          used_real_ebay_data: !!result._usedRealEbayData,
           status: "ready",
         })
         .eq("id", id);
@@ -641,18 +642,22 @@ export default function Home() {
       const quick = await analyzeItem(safePhotos, "quick");
       const sizeApplicable = quick.size_applicable === true;
       const size = quick.size || null;
+      const searchQuery = quick.search_query || null;
 
       if (sizeApplicable && !size) {
         // Stop here - can't write an accurate listing without knowing the size.
         // The item page will show a required prompt; runFullGeneration only
         // fires once the user answers it (see confirmSizeGate).
-        await supabase.from("items").update({ status: "needs_size", size_applicable: true, size: null }).eq("id", id);
+        await supabase
+          .from("items")
+          .update({ status: "needs_size", size_applicable: true, size: null, ebay_search_query: searchQuery })
+          .eq("id", id);
         fetchItems();
         return;
       }
 
-      await supabase.from("items").update({ size_applicable: sizeApplicable, size }).eq("id", id);
-      await runFullGeneration(id, photos, sizeApplicable && size ? { size } : null);
+      await supabase.from("items").update({ size_applicable: sizeApplicable, size, ebay_search_query: searchQuery }).eq("id", id);
+      await runFullGeneration(id, photos, sizeApplicable && size ? { size } : null, searchQuery);
     } catch (err) {
       console.error(err);
       await supabase.from("items").update({ status: "error", error_detail: err.message || String(err) }).eq("id", id);
@@ -732,7 +737,7 @@ export default function Home() {
     setSelectedItem((s) => ({ ...s, status: "processing" }));
     setEditing(false);
     fetchItems();
-    runFullGeneration(editDraft.id, editDraft.photos, Object.keys(confirmedFields).length ? confirmedFields : null);
+    runFullGeneration(editDraft.id, editDraft.photos, Object.keys(confirmedFields).length ? confirmedFields : null, editDraft.ebay_search_query);
   };
 
   const retryItem = async (item) => {
@@ -751,7 +756,7 @@ export default function Home() {
     setSelectedItem((s) => ({ ...s, size, status: "processing" }));
     setSizeGateInput("");
     fetchItems();
-    runFullGeneration(item.id, item.photos, size === "Not specified" ? null : { size });
+    runFullGeneration(item.id, item.photos, size === "Not specified" ? null : { size }, item.ebay_search_query);
   };
 
   const [soldFormFor, setSoldFormFor] = useState(null);
@@ -1379,7 +1384,16 @@ export default function Home() {
 
                 {(selectedItem.vinted_price_low != null || selectedItem.demand || selectedItem.listing_recommendation) && (
                   <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-3 mb-5">
-                    <p className="text-xs text-[#8A7F63] uppercase tracking-wide mb-2">Pricing intelligence</p>
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs text-[#8A7F63] uppercase tracking-wide">Pricing intelligence</p>
+                      <span className={`text-[10px] font-mono uppercase px-1.5 py-0.5 rounded-sm ${
+                        selectedItem.used_real_ebay_data
+                          ? "bg-[#3F5E42]/15 text-[#3F5E42]"
+                          : "bg-[#8A7F63]/15 text-[#6B6250]"
+                      }`}>
+                        {selectedItem.used_real_ebay_data ? "Real eBay data" : "AI estimate"}
+                      </span>
+                    </div>
                     <div className="flex flex-wrap gap-x-6 gap-y-2 font-mono text-sm mb-2">
                       <div>
                         <span className="text-[#8A7F63] text-xs block">eBay est.</span>
