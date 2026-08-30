@@ -1331,6 +1331,41 @@ export default function Home() {
           <div className="flex-1 overflow-y-auto p-4 sm:p-8 max-w-2xl w-full mx-auto">
             <DownloadablePhotos item={selectedItem} saveDirHandle={saveDirHandle} onChooseFolder={chooseSaveFolder} />
 
+            {selectedItem.status === "ready" && (
+              <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-3 mb-5">
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-xs text-[#8A7F63] uppercase tracking-wide">Pricing intelligence</p>
+                  <span className={`text-[10px] font-mono uppercase px-1.5 py-0.5 rounded-sm ${
+                    selectedItem.used_real_ebay_data
+                      ? "bg-[#3F5E42]/15 text-[#3F5E42]"
+                      : "bg-[#8A7F63]/15 text-[#6B6250]"
+                  }`}>
+                    {selectedItem.used_real_ebay_data ? "Real eBay data" : "AI estimate"}
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-x-6 gap-y-2 font-mono text-sm mb-2">
+                  <div>
+                    <span className="text-[#8A7F63] text-xs block">eBay est.</span>
+                    <span>{selectedItem.price_low != null ? `£${selectedItem.price_low}–£${selectedItem.price_high}` : "Unknown"}</span>
+                  </div>
+                  <div>
+                    <span className="text-[#8A7F63] text-xs block">Vinted est.</span>
+                    <span>{selectedItem.vinted_price_low != null ? `£${selectedItem.vinted_price_low}–£${selectedItem.vinted_price_high}` : "Unknown"}</span>
+                  </div>
+                  <div>
+                    <span className="text-[#8A7F63] text-xs block">Demand (AI estimate)</span>
+                    <span className="capitalize">{selectedItem.demand || "Unknown"}</span>
+                  </div>
+                </div>
+                <p className="text-sm text-[#2B2620]">
+                  {selectedItem.listing_recommendation || "No recommendation returned for this item."}
+                </p>
+                <p className="text-xs text-[#8A7F63] mt-2">
+                  Not a real eBay sell-through rate - eBay doesn't give apps like this access to actual sold-item statistics. "Demand" is the AI's read of what it saw in search, not a verified figure.
+                </p>
+              </div>
+            )}
+
             <div className="mb-3">
               <StatusBadge item={selectedItem} />
             </div>
@@ -1481,42 +1516,6 @@ export default function Home() {
               <>
                 <ListingHelper item={selectedItem} />
 
-                {(selectedItem.vinted_price_low != null || selectedItem.demand || selectedItem.listing_recommendation) && (
-                  <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-3 mb-5">
-                    <div className="flex items-center justify-between mb-2">
-                      <p className="text-xs text-[#8A7F63] uppercase tracking-wide">Pricing intelligence</p>
-                      <span className={`text-[10px] font-mono uppercase px-1.5 py-0.5 rounded-sm ${
-                        selectedItem.used_real_ebay_data
-                          ? "bg-[#3F5E42]/15 text-[#3F5E42]"
-                          : "bg-[#8A7F63]/15 text-[#6B6250]"
-                      }`}>
-                        {selectedItem.used_real_ebay_data ? "Real eBay data" : "AI estimate"}
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap gap-x-6 gap-y-2 font-mono text-sm mb-2">
-                      <div>
-                        <span className="text-[#8A7F63] text-xs block">eBay est.</span>
-                        <span>£{selectedItem.price_low}–£{selectedItem.price_high}</span>
-                      </div>
-                      {selectedItem.vinted_price_low != null && (
-                        <div>
-                          <span className="text-[#8A7F63] text-xs block">Vinted est.</span>
-                          <span>£{selectedItem.vinted_price_low}–£{selectedItem.vinted_price_high}</span>
-                        </div>
-                      )}
-                      {selectedItem.demand && (
-                        <div>
-                          <span className="text-[#8A7F63] text-xs block">Demand</span>
-                          <span className="capitalize">{selectedItem.demand}</span>
-                        </div>
-                      )}
-                    </div>
-                    {selectedItem.listing_recommendation && (
-                      <p className="text-sm text-[#2B2620]">{selectedItem.listing_recommendation}</p>
-                    )}
-                  </div>
-                )}
-
                 <ListedToggles item={selectedItem} onToggle={togglePlatform} />
 
                 {(() => {
@@ -1536,7 +1535,11 @@ export default function Home() {
                         )}
                       </div>
                       {pipeline.stage === "ebay" && !selectedItem.vinted_listed_at && (
-                        <p className="text-sm">Add it to Vinted (toggle above) at a reduced price.</p>
+                        pipeline.flag === "none" ? (
+                          <p className="text-sm text-[#8A7F63]">On track — no action needed yet. If it hasn't sold by day 7, add it to Vinted at a reduced price.</p>
+                        ) : (
+                          <p className="text-sm">Day 7 has passed — add it to Vinted (toggle above) at a reduced price.</p>
+                        )
                       )}
                       {pipeline.stage === "vinted" && !selectedItem.vinted_reduced_at && (
                         <button
