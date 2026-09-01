@@ -3,6 +3,38 @@ import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, Ch
 import { supabase } from "../lib/supabaseClient";
 
 const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra"];
+const PHOTO_BUCKET = "item-photos";
+
+// ---------- storage helpers ----------
+
+// Uploads a data URL to Supabase Storage and returns its public URL.
+// This is what actually fixes the egress problem: a Storage URL can be
+// cached by the browser, so viewing the same photo again later costs
+// nothing, unlike a base64 blob embedded straight in a database row.
+async function uploadPhotoToStorage(dataUrl, path) {
+  const blob = await (await fetch(dataUrl)).blob();
+  const { error } = await supabase.storage.from(PHOTO_BUCKET).upload(path, blob, {
+    contentType: "image/jpeg",
+    upsert: true,
+  });
+  if (error) throw error;
+  const { data } = supabase.storage.from(PHOTO_BUCKET).getPublicUrl(path);
+  return data.publicUrl;
+}
+
+// The AI pipeline and size-limit compression both need actual image data
+// (base64), not a URL - this fetches a Storage URL back into a data URL
+// only at the moment it's actually needed for processing.
+async function urlToDataUrl(url) {
+  if (url.startsWith("data:")) return url; // already a data URL (legacy/unmigrated item)
+  const blob = await (await fetch(url)).blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Could not read photo from storage"));
+    reader.readAsDataURL(blob);
+  });
+}
 
 // ---------- image helpers ----------
 
@@ -107,7 +139,7 @@ function estimateBytes(dataUrl) {
 }
 
 async function ensureUnderSizeLimit(photos, maxTotalBytes = 3200000) {
-  let current = photos;
+  let current = await Promise.all(photos.map(urlToDataUrl));
   let quality = 0.5;
   let width = 700;
   for (let attempt = 0; attempt < 7; attempt++) {
@@ -529,10 +561,10 @@ function DownloadablePhotos({ item, saveDirHandle, onChooseFolder }) {
     try {
       const JSZip = (await import("jszip")).default;
       const zip = new JSZip();
-      (item.photos || []).forEach((dataUrl, i) => {
-        const base64 = dataUrl.split(",")[1];
-        zip.file(`${titleSlug}-${i + 1}.jpg`, base64, { base64: true });
-      });
+      for (let i = 0; i < (item.photos || []).length; i++) {
+        const blob = await (await fetch(item.photos[i])).blob();
+        zip.file(`${titleSlug}-${i + 1}.jpg`, blob);
+      }
       const blob = await zip.generateAsync({ type: "blob" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -835,13 +867,25 @@ export default function Home() {
   const handleNextItem = async () => {
     if (currentPhotos.length === 0) return;
     try {
+      const id = crypto.randomUUID();
       const thumbnail = await resizeDataUrl(currentPhotos[0], 600, 0.65).catch(() => currentPhotos[0]);
+
+      // Upload full-size photos to Storage instead of embedding them in the
+      // database row - this is what actually fixes the egress problem, since
+      // Storage URLs can be cached by the browser after the first view.
+      const photoUrls = [];
+      for (let i = 0; i < currentPhotos.length; i++) {
+        const url = await uploadPhotoToStorage(currentPhotos[i], `${id}/${i}.jpg`);
+        photoUrls.push(url);
+      }
+
       const { data, error } = await supabase
         .from("items")
         .insert({
+          id,
           title: "Untitled item",
           status: "processing",
-          photos: currentPhotos,
+          photos: photoUrls,
           thumbnail,
           batch: currentBatch.trim() || null,
         })
@@ -852,21 +896,33 @@ export default function Home() {
       setCurrentPhotos([]);
       setEnhancedFlags([]);
       fetchItems();
-      processItem(data.id, currentPhotos);
+      processItem(data.id, photoUrls);
     } catch (err) {
       console.error("handleNextItem failed:", err);
       alert("Next item failed: " + (err.message || JSON.stringify(err)));
     }
   };
 
+  const itemDetailCache = useRef({});
+  const CACHE_TTL_MS = 60000;
+
   const openItem = async (item) => {
     setSelectedItem(item);
     setEditDraft(item);
     setEditing(false);
     setSizeGateInput("");
+
+    const cached = itemDetailCache.current[item.id];
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      setSelectedItem(cached.data);
+      setEditDraft(cached.data);
+      return;
+    }
+
     try {
       const { data, error } = await supabase.from("items").select("*").eq("id", item.id).single();
       if (!error && data) {
+        itemDetailCache.current[item.id] = { data, timestamp: Date.now() };
         setSelectedItem(data);
         setEditDraft(data);
       }
@@ -940,6 +996,66 @@ export default function Home() {
   const [soldFormFor, setSoldFormFor] = useState(null);
   const [soldPriceInput, setSoldPriceInput] = useState("");
   const [costPriceInput, setCostPriceInput] = useState("");
+
+  const [exporting, setExporting] = useState(false);
+
+  const [migrating, setMigrating] = useState(false);
+  const [migrateProgress, setMigrateProgress] = useState("");
+
+  const migratePhotosToStorage = async () => {
+    setMigrating(true);
+    try {
+      const { data, error } = await supabase.from("items").select("id, photos");
+      if (error) throw error;
+      const toMigrate = (data || []).filter((i) => i.photos?.length && i.photos[0]?.startsWith("data:"));
+      if (toMigrate.length === 0) {
+        alert("Nothing to migrate - every item already uses Storage.");
+        setMigrating(false);
+        return;
+      }
+      for (let idx = 0; idx < toMigrate.length; idx++) {
+        const item = toMigrate[idx];
+        setMigrateProgress(`Migrating ${idx + 1} of ${toMigrate.length}…`);
+        const urls = [];
+        for (let i = 0; i < item.photos.length; i++) {
+          const url = await uploadPhotoToStorage(item.photos[i], `${item.id}/${i}.jpg`);
+          urls.push(url);
+        }
+        await supabase.from("items").update({ photos: urls }).eq("id", item.id);
+      }
+      itemDetailCache.current = {};
+      fetchItems();
+      alert(`Done - migrated ${toMigrate.length} item(s) to Storage.`);
+    } catch (err) {
+      console.error("Migration failed:", err);
+      alert("Migration failed: " + (err.message || err));
+    } finally {
+      setMigrating(false);
+      setMigrateProgress("");
+    }
+  };
+
+  const exportBackup = async () => {
+    setExporting(true);
+    try {
+      const { data, error } = await supabase.from("items").select("*").order("created_at", { ascending: false });
+      if (error) throw error;
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `itemgen-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Export failed:", err);
+      alert("Backup export failed: " + (err.message || err));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const openSoldForm = (item) => {
     setSoldFormFor(item);
@@ -1092,6 +1208,24 @@ export default function Home() {
                     View All Items
                   </button>
                 </div>
+
+                <button
+                  onClick={exportBackup}
+                  disabled={exporting}
+                  className="w-full mb-2 py-2.5 rounded bg-[#F7F3E8] border border-[#C9BFA3] text-[#6B6250] text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                  {exporting ? "Preparing backup…" : "Export full backup (includes photos)"}
+                </button>
+
+                <button
+                  onClick={migratePhotosToStorage}
+                  disabled={migrating}
+                  className="w-full mb-8 py-2.5 rounded bg-[#3F5E42]/10 border border-[#3F5E42]/40 text-[#3F5E42] text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {migrating ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                  {migrating ? migrateProgress || "Migrating…" : "Migrate existing photos to Storage"}
+                </button>
 
                 {needsAttention.length > 0 && (
                   <div className="mb-8">
