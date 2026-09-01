@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download } from "lucide-react";
+import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download, Settings as SettingsIcon } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
 const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra"];
@@ -728,6 +728,7 @@ export default function Home() {
   const [currentBatch, setCurrentBatch] = useState("");
   const [batchFilter, setBatchFilter] = useState("all");
   const [stockSearch, setStockSearch] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [pipelineFilter, setPipelineFilter] = useState("all");
   const [capturing, setCapturing] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
@@ -999,56 +1000,6 @@ export default function Home() {
 
   const [exporting, setExporting] = useState(false);
 
-  const [migrating, setMigrating] = useState(false);
-  const [migrateProgress, setMigrateProgress] = useState("");
-
-  const migratePhotosToStorage = async () => {
-    setMigrating(true);
-    try {
-      const { data: idList, error: idErr } = await supabase.from("items").select("id");
-      if (idErr) throw idErr;
-
-      let migratedCount = 0;
-      for (let idx = 0; idx < (idList || []).length; idx++) {
-        const { id } = idList[idx];
-        setMigrateProgress(`Checking ${idx + 1} of ${idList.length}…`);
-
-        const { data: full, error: fullErr } = await supabase
-          .from("items")
-          .select("id, photos")
-          .eq("id", id)
-          .single();
-
-        if (fullErr) {
-          console.error(`Skipping ${id}, couldn't load:`, fullErr);
-          continue;
-        }
-        if (!full?.photos?.length || !full.photos[0]?.startsWith("data:")) {
-          continue; // already migrated or no photos
-        }
-
-        setMigrateProgress(`Migrating ${idx + 1} of ${idList.length}…`);
-        const urls = [];
-        for (let i = 0; i < full.photos.length; i++) {
-          const url = await uploadPhotoToStorage(full.photos[i], `${id}/${i}.jpg`);
-          urls.push(url);
-        }
-        await supabase.from("items").update({ photos: urls }).eq("id", id);
-        migratedCount++;
-      }
-
-      itemDetailCache.current = {};
-      fetchItems();
-      alert(migratedCount > 0 ? `Done - migrated ${migratedCount} item(s) to Storage.` : "Nothing to migrate - every item already uses Storage.");
-    } catch (err) {
-      console.error("Migration failed:", err);
-      alert("Migration failed: " + (err.message || err));
-    } finally {
-      setMigrating(false);
-      setMigrateProgress("");
-    }
-  };
-
   const exportBackup = async () => {
     setExporting(true);
     try {
@@ -1138,31 +1089,58 @@ export default function Home() {
           </div>
           <span className="font-serif text-xl tracking-tight">ItemGen</span>
         </div>
-        <div className="flex bg-[#F7F3E8] rounded-sm p-0.5 border border-[#C9BFA3]">
-          <button
-            onClick={() => setView("dashboard")}
-            className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "dashboard" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
-          >
-            Home
-          </button>
-          <button
-            onClick={() => setView("capture")}
-            className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "capture" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
-          >
-            Upload New
-          </button>
-          <button
-            onClick={() => setView("stock")}
-            className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "stock" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
-          >
-            Stock {items.length > 0 && `(${items.length})`}
-          </button>
-          <button
-            onClick={() => setView("pipeline")}
-            className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "pipeline" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
-          >
-            Item Status
-          </button>
+        <div className="flex items-center gap-2">
+          <div className="flex bg-[#F7F3E8] rounded-sm p-0.5 border border-[#C9BFA3]">
+            <button
+              onClick={() => setView("dashboard")}
+              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "dashboard" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
+            >
+              Home
+            </button>
+            <button
+              onClick={() => setView("capture")}
+              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "capture" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
+            >
+              Upload New
+            </button>
+            <button
+              onClick={() => setView("stock")}
+              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "stock" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
+            >
+              Stock {items.length > 0 && `(${items.length})`}
+            </button>
+            <button
+              onClick={() => setView("pipeline")}
+              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "pipeline" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
+            >
+              Item Status
+            </button>
+          </div>
+
+          <div className="relative">
+            <button
+              onClick={() => setSettingsOpen((s) => !s)}
+              className="w-8 h-8 flex items-center justify-center rounded-sm border border-[#C9BFA3] bg-[#F7F3E8] text-[#6B6250]"
+              title="Settings"
+            >
+              <SettingsIcon size={16} />
+            </button>
+            {settingsOpen && (
+              <div className="absolute right-0 mt-1 w-56 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm shadow-lg z-20 p-1">
+                <button
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    exportBackup();
+                  }}
+                  disabled={exporting}
+                  className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#2B2620] hover:bg-[#DCD4BC] flex items-center gap-2 disabled:opacity-50"
+                >
+                  {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                  {exporting ? "Preparing backup…" : "Export full backup"}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1222,24 +1200,6 @@ export default function Home() {
                     View All Items
                   </button>
                 </div>
-
-                <button
-                  onClick={exportBackup}
-                  disabled={exporting}
-                  className="w-full mb-2 py-2.5 rounded bg-[#F7F3E8] border border-[#C9BFA3] text-[#6B6250] text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50"
-                >
-                  {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-                  {exporting ? "Preparing backup…" : "Export full backup (includes photos)"}
-                </button>
-
-                <button
-                  onClick={migratePhotosToStorage}
-                  disabled={migrating}
-                  className="w-full mb-8 py-2.5 rounded bg-[#3F5E42]/10 border border-[#3F5E42]/40 text-[#3F5E42] text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50"
-                >
-                  {migrating ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                  {migrating ? migrateProgress || "Migrating…" : "Migrate existing photos to Storage"}
-                </button>
 
                 {needsAttention.length > 0 && (
                   <div className="mb-8">
