@@ -1005,27 +1005,41 @@ export default function Home() {
   const migratePhotosToStorage = async () => {
     setMigrating(true);
     try {
-      const { data, error } = await supabase.from("items").select("id, photos");
-      if (error) throw error;
-      const toMigrate = (data || []).filter((i) => i.photos?.length && i.photos[0]?.startsWith("data:"));
-      if (toMigrate.length === 0) {
-        alert("Nothing to migrate - every item already uses Storage.");
-        setMigrating(false);
-        return;
-      }
-      for (let idx = 0; idx < toMigrate.length; idx++) {
-        const item = toMigrate[idx];
-        setMigrateProgress(`Migrating ${idx + 1} of ${toMigrate.length}…`);
+      const { data: idList, error: idErr } = await supabase.from("items").select("id");
+      if (idErr) throw idErr;
+
+      let migratedCount = 0;
+      for (let idx = 0; idx < (idList || []).length; idx++) {
+        const { id } = idList[idx];
+        setMigrateProgress(`Checking ${idx + 1} of ${idList.length}…`);
+
+        const { data: full, error: fullErr } = await supabase
+          .from("items")
+          .select("id, photos")
+          .eq("id", id)
+          .single();
+
+        if (fullErr) {
+          console.error(`Skipping ${id}, couldn't load:`, fullErr);
+          continue;
+        }
+        if (!full?.photos?.length || !full.photos[0]?.startsWith("data:")) {
+          continue; // already migrated or no photos
+        }
+
+        setMigrateProgress(`Migrating ${idx + 1} of ${idList.length}…`);
         const urls = [];
-        for (let i = 0; i < item.photos.length; i++) {
-          const url = await uploadPhotoToStorage(item.photos[i], `${item.id}/${i}.jpg`);
+        for (let i = 0; i < full.photos.length; i++) {
+          const url = await uploadPhotoToStorage(full.photos[i], `${id}/${i}.jpg`);
           urls.push(url);
         }
-        await supabase.from("items").update({ photos: urls }).eq("id", item.id);
+        await supabase.from("items").update({ photos: urls }).eq("id", id);
+        migratedCount++;
       }
+
       itemDetailCache.current = {};
       fetchItems();
-      alert(`Done - migrated ${toMigrate.length} item(s) to Storage.`);
+      alert(migratedCount > 0 ? `Done - migrated ${migratedCount} item(s) to Storage.` : "Nothing to migrate - every item already uses Storage.");
     } catch (err) {
       console.error("Migration failed:", err);
       alert("Migration failed: " + (err.message || err));
