@@ -220,6 +220,40 @@ function BackgroundSunflower() {
   );
 }
 
+// Item Status colour categories. Deliberately solid/saturated (not faint
+// tints) so each category reads clearly at a glance across Stock and Item
+// Status. "both" (eBay + Vinted) gets its own colour rather than reusing
+// either single-platform colour, so it's never mistaken for just one of them.
+const CATEGORY_STYLES = {
+  unlisted: { label: "Unlisted", solid: "bg-[#6B6250] text-white", tint: "bg-[#6B6250]/15 border-[#6B6250]/40", text: "text-[#6B6250]" },
+  ebay: { label: "Listed on eBay", solid: "bg-[#3B6E91] text-white", tint: "bg-[#3B6E91]/15 border-[#3B6E91]/40", text: "text-[#3B6E91]" },
+  vinted: { label: "Listed on Vinted", solid: "bg-[#7A5980] text-white", tint: "bg-[#7A5980]/15 border-[#7A5980]/40", text: "text-[#7A5980]" },
+  both: { label: "Listed on both", solid: "bg-[#B8860B] text-white", tint: "bg-[#B8860B]/15 border-[#B8860B]/40", text: "text-[#B8860B]" },
+  sold: { label: "Sold", solid: "bg-[#3F5E42] text-white", tint: "bg-[#3F5E42]/15 border-[#3F5E42]/40", text: "text-[#3F5E42]" },
+  ready_for_posting: { label: "Ready for posting", solid: "bg-[#A63A2E] text-white", tint: "bg-[#A63A2E]/15 border-[#A63A2E]/40", text: "text-[#A63A2E]" },
+  payment_due: { label: "Payment due", solid: "bg-[#A9822E] text-white", tint: "bg-[#A9822E]/15 border-[#A9822E]/40", text: "text-[#A9822E]" },
+};
+
+// Works out which colour category an item belongs in. Active items are
+// judged purely on the eBay/Vinted booleans (Depop still shown as a small
+// chip elsewhere but doesn't get its own main colour yet). Sold items split
+// into payment-due / ready-for-posting / fully-done so the post-sale steps
+// stay just as visible as the listing status.
+function getListingCategory(item) {
+  if (item.status === "sold") {
+    if (!item.payment_received) return "payment_due";
+    if (!item.posted_at) return "ready_for_posting";
+    return "sold";
+  }
+  if (item.status !== "ready") return null;
+  const onEbay = !!item.ebay_listed;
+  const onVinted = !!item.vinted_listed;
+  if (onEbay && onVinted) return "both";
+  if (onEbay) return "ebay";
+  if (onVinted) return "vinted";
+  return "unlisted";
+}
+
 function StatusBadge({ item }) {
   const status = item.status;
   const map = {
@@ -228,24 +262,12 @@ function StatusBadge({ item }) {
     error: { label: "Failed", cls: "bg-[#A63A2E] text-white" },
   };
 
-  if (status === "sold") {
-    const info = getSoldInfo(item);
-    const colorMap = { none: "bg-[#3F5E42] text-white", orange: "bg-[#A9822E] text-white", red: "bg-[#A63A2E] text-white" };
-    const s = { label: info.label, cls: colorMap[info.flag] };
+  if (status === "sold" || status === "ready") {
+    const category = getListingCategory(item);
+    const style = CATEGORY_STYLES[category] || CATEGORY_STYLES.unlisted;
     return (
-      <span className={`inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm ${s.cls}`}>
-        {s.label}
-      </span>
-    );
-  }
-
-  if (status === "ready") {
-    const platforms = [item.ebay_listed && "eBay", item.vinted_listed && "Vinted", item.depop_listed && "Depop"].filter(Boolean);
-    const label = platforms.length ? platforms.join(" + ") : "Unlisted";
-    const cls = platforms.length ? "bg-[#3F5E42] text-white" : "bg-[#8A7F63] text-white";
-    return (
-      <span className={`inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm ${cls}`}>
-        {label}
+      <span className={`inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm ${style.solid}`}>
+        {style.label}
       </span>
     );
   }
@@ -428,12 +450,17 @@ function StockListRow({ item: e, onOpen }) {
   const pipeline = getPipelineInfo(e);
   const soldInfo = getSoldInfo(e);
   const flagStyle = pipeline ? FLAG_STYLES[pipeline.flag] : FLAG_STYLES.none;
+  const category = getListingCategory(e);
+  const categoryStyle = category ? CATEGORY_STYLES[category] : null;
+  // An overdue pipeline flag (red/orange, from the day-counter) takes visual
+  // priority over the plain category colour, since it's a "do something now"
+  // signal rather than just a status label - otherwise, colour by category.
   const cardCls =
-    soldInfo && soldInfo.flag !== "none"
-      ? FLAG_STYLES[soldInfo.flag].card
-      : isListed && pipeline?.flag === "none"
-      ? "bg-[#3F5E42]/10 border-[#3F5E42]/40"
-      : flagStyle.card;
+    pipeline && pipeline.flag !== "none"
+      ? flagStyle.card
+      : categoryStyle
+      ? categoryStyle.tint
+      : "bg-[#F7F3E8] border-[#C9BFA3]";
 
   return (
     <button
