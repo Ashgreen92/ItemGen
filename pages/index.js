@@ -1270,27 +1270,26 @@ export default function Home() {
       {view === "pipeline" && (
         <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
           {(() => {
-            const withStage = items
-              .filter((e) => e.status === "ready")
-              .map((e) => ({ ...e, _pipeline: getPipelineInfo(e) }));
-            const paymentDue = items.filter((e) => e.status === "sold" && !e.payment_received);
-            const needsPosting = items.filter((e) => e.status === "sold" && e.payment_received && !e.posted_at);
-            const outstanding = [
-              ...withStage.filter((e) => e._pipeline?.flag !== "none"),
-              ...paymentDue,
-              ...needsPosting,
-            ];
+            // Everything currently active (listed or not) or sold, tagged with
+            // the same colour category used for the badges/cards in Stock.
+            const categorized = items
+              .filter((e) => e.status === "ready" || e.status === "sold")
+              .map((e) => ({ ...e, _category: getListingCategory(e) }));
 
-            let filtered;
-            if (pipelineFilter === "outstanding") filtered = outstanding;
-            else if (pipelineFilter === "payment_due") filtered = paymentDue;
-            else if (pipelineFilter === "needs_posting") filtered = needsPosting;
-            else if (pipelineFilter === "all") filtered = withStage;
-            else filtered = withStage.filter((e) => e._pipeline?.stage === pipelineFilter);
+            const CATEGORY_ORDER = ["unlisted", "ebay", "vinted", "both", "sold", "ready_for_posting", "payment_due"];
+            const categoryCounts = {};
+            categorized.forEach((e) => {
+              if (e._category) categoryCounts[e._category] = (categoryCounts[e._category] || 0) + 1;
+            });
 
-            // bundle suggestions: same category + size, count >= 2
+            const filtered =
+              pipelineFilter === "all" ? categorized : categorized.filter((e) => e._category === pipelineFilter);
+
+            // bundle suggestions: same category + size, count >= 2 - only makes
+            // sense for items not yet sold, so this stays scoped to "ready".
+            const readyItems = items.filter((e) => e.status === "ready");
             const groups = {};
-            withStage.forEach((e) => {
+            readyItems.forEach((e) => {
               if (!e.category || !e.size) return;
               const key = `${e.category.trim().toLowerCase()}|${e.size.trim().toLowerCase()}`;
               if (!groups[key]) groups[key] = [];
@@ -1298,17 +1297,11 @@ export default function Home() {
             });
             const bundleSuggestions = Object.values(groups).filter((g) => g.length >= 2);
 
-            const stageCounts = {};
-            withStage.forEach((e) => {
-              const s = e._pipeline?.stage;
-              if (s) stageCounts[s] = (stageCounts[s] || 0) + 1;
-            });
-
             return (
               <>
                 <p className="font-serif text-2xl mb-1">Item Status</p>
                 <p className="text-sm text-[#8A7F63] mb-5">
-                  Where each active listing sits in the eBay → Vinted → reduce → relist cycle.
+                  Where each item stands — unlisted, listed, sold, or ready for posting.
                 </p>
 
                 <div className="flex flex-wrap gap-2 mb-5">
@@ -1316,35 +1309,23 @@ export default function Home() {
                     onClick={() => setPipelineFilter("all")}
                     className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === "all" ? "bg-[#A9822E] border-[#A9822E] text-white" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"}`}
                   >
-                    All ({withStage.length})
+                    All ({categorized.length})
                   </button>
-                  {Object.entries(PIPELINE_STAGES).map(([key, s]) => (
-                    <button
-                      key={key}
-                      onClick={() => setPipelineFilter(key)}
-                      className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === key ? "bg-[#A9822E] border-[#A9822E] text-white" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"}`}
-                    >
-                      {s.label} ({stageCounts[key] || 0})
-                    </button>
-                  ))}
-                  <button
-                    onClick={() => setPipelineFilter("outstanding")}
-                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === "outstanding" ? "bg-[#A63A2E] border-[#A63A2E] text-white" : "bg-[#A63A2E]/10 border-[#A63A2E]/40 text-[#A63A2E]"}`}
-                  >
-                    Outstanding ({outstanding.length})
-                  </button>
-                  <button
-                    onClick={() => setPipelineFilter("payment_due")}
-                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === "payment_due" ? "bg-[#A9822E] border-[#A9822E] text-white" : "bg-[#A9822E]/10 border-[#A9822E]/40 text-[#A9822E]"}`}
-                  >
-                    Payment due ({paymentDue.length})
-                  </button>
-                  <button
-                    onClick={() => setPipelineFilter("needs_posting")}
-                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === "needs_posting" ? "bg-[#A9822E] border-[#A9822E] text-white" : "bg-[#A9822E]/10 border-[#A9822E]/40 text-[#A9822E]"}`}
-                  >
-                    Awaiting posting ({needsPosting.length})
-                  </button>
+                  {CATEGORY_ORDER.map((key) => {
+                    const style = CATEGORY_STYLES[key];
+                    const active = pipelineFilter === key;
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => setPipelineFilter(key)}
+                        className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${
+                          active ? `${style.solid} border-transparent` : `${style.tint} ${style.text}`
+                        }`}
+                      >
+                        {style.label} ({categoryCounts[key] || 0})
+                      </button>
+                    );
+                  })}
                 </div>
 
                 {bundleSuggestions.length > 0 && (
