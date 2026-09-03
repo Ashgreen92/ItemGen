@@ -1275,41 +1275,6 @@ export default function Home() {
     fetchItems();
   };
 
-  const [migratingThumbnails, setMigratingThumbnails] = useState(false);
-
-  // One-time migration for items whose thumbnail is still a base64 blob sitting
-  // directly in the database row (from before thumbnails moved to Storage) -
-  // that's what was getting re-read on every single fetchItems call, which is
-  // what actually caused the egress spike. Nothing gets deleted, just moved.
-  const migrateThumbnailsToStorage = async () => {
-    if (!window.confirm("This moves any thumbnail still stored directly in the database out to Storage instead, so it stops being re-read on every page load. Nothing is deleted. Continue?")) {
-      return;
-    }
-    setMigratingThumbnails(true);
-    let migrated = 0;
-    try {
-      const { data, error } = await supabase.from("items").select("id, thumbnail");
-      if (error) throw error;
-      const targets = (data || []).filter((i) => typeof i.thumbnail === "string" && i.thumbnail.startsWith("data:"));
-      for (const item of targets) {
-        try {
-          const url = await uploadPhotoToStorage(item.thumbnail, `${item.id}/thumb.jpg`);
-          await supabase.from("items").update({ thumbnail: url }).eq("id", item.id);
-          migrated++;
-        } catch (err) {
-          console.error("Failed to migrate thumbnail for", item.id, err);
-        }
-      }
-      alert(`Migrated ${migrated} thumbnail(s) to Storage.`);
-    } catch (err) {
-      console.error("Migration failed:", err);
-      alert("Migration failed: " + (err.message || err));
-    } finally {
-      setMigratingThumbnails(false);
-      fetchItems();
-    }
-  };
-
   const removeItem = async (id) => {
     await supabase.from("items").delete().eq("id", id);
     fetchItems();
@@ -1392,7 +1357,7 @@ export default function Home() {
               <SettingsIcon size={16} />
             </button>
             {settingsOpen && (
-              <div className="absolute right-0 mt-1 w-64 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm shadow-lg z-20 p-1">
+              <div className="absolute right-0 mt-1 w-56 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm shadow-lg z-20 p-1">
                 <button
                   onClick={() => {
                     setSettingsOpen(false);
@@ -1403,17 +1368,6 @@ export default function Home() {
                 >
                   {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
                   {exporting ? "Preparing backup…" : "Export full backup"}
-                </button>
-                <button
-                  onClick={() => {
-                    setSettingsOpen(false);
-                    migrateThumbnailsToStorage();
-                  }}
-                  disabled={migratingThumbnails}
-                  className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#2B2620] hover:bg-[#DCD4BC] flex items-center gap-2 disabled:opacity-50"
-                >
-                  {migratingThumbnails ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                  {migratingThumbnails ? "Migrating…" : "Migrate old thumbnails to Storage"}
                 </button>
               </div>
             )}
