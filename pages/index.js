@@ -231,17 +231,15 @@ const CATEGORY_STYLES = {
   both: { label: "Listed on both", solid: "bg-[#B8860B] text-white", tint: "bg-[#B8860B]/15 border-[#B8860B]/40", text: "text-[#B8860B]" },
   sold: { label: "Sold", solid: "bg-[#3F5E42] text-white", tint: "bg-[#3F5E42]/15 border-[#3F5E42]/40", text: "text-[#3F5E42]" },
   ready_for_posting: { label: "Ready for posting", solid: "bg-[#A63A2E] text-white", tint: "bg-[#A63A2E]/15 border-[#A63A2E]/40", text: "text-[#A63A2E]" },
-  payment_due: { label: "Payment due", solid: "bg-[#A9822E] text-white", tint: "bg-[#A9822E]/15 border-[#A9822E]/40", text: "text-[#A9822E]" },
 };
 
 // Works out which colour category an item belongs in. Active items are
 // judged purely on the eBay/Vinted booleans (Depop still shown as a small
-// chip elsewhere but doesn't get its own main colour yet). Sold items split
-// into payment-due / ready-for-posting / fully-done so the post-sale steps
-// stay just as visible as the listing status.
+// chip elsewhere but doesn't get its own main colour yet). Sold items go
+// straight to "ready for posting" the moment they're marked sold - no
+// separate payment-due gate - until the posted step is confirmed.
 function getListingCategory(item) {
   if (item.status === "sold") {
-    if (!item.payment_received) return "payment_due";
     if (!item.posted_at) return "ready_for_posting";
     return "sold";
   }
@@ -332,11 +330,21 @@ function fmtDate(iso) {
   return new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
+// Ledger-style money formatting: signed=true shows an explicit + or - sign,
+// used anywhere money is moving in or out (revenue in, cost out) rather than
+// just a running total.
+function fmtMoney(amount, { signed = false } = {}) {
+  const v = Number(amount) || 0;
+  const abs = Math.abs(v).toFixed(2);
+  if (!signed || v === 0) return `£${abs}`;
+  return `${v > 0 ? "+" : "-"}£${abs}`;
+}
+
 function ListedToggles({ item, onToggle }) {
   const platforms = [
-    { field: "ebay_listed", label: "eBay" },
-    { field: "vinted_listed", label: "Vinted" },
-    { field: "depop_listed", label: "Depop" },
+    { field: "ebay_listed", label: "eBay", priceField: "ebay_listed_price" },
+    { field: "vinted_listed", label: "Vinted", priceField: "vinted_listed_price" },
+    { field: "depop_listed", label: "Depop", priceField: null },
   ];
   return (
     <div className="mb-5">
@@ -358,6 +366,9 @@ function ListedToggles({ item, onToggle }) {
             }`}
           >
             {item[p.field] ? "✓ " : ""}{p.label}
+            {item[p.field] && p.priceField && item[p.priceField] != null && (
+              <span className="font-mono"> · £{item[p.priceField]}</span>
+            )}
             {item[p.field] && item[`${p.field}_at`] && (
               <span className="opacity-70"> · {fmtDate(item[`${p.field}_at`])}</span>
             )}
@@ -386,16 +397,13 @@ function daysSince(iso) {
   return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
 }
 
-// Post-sale lifecycle: payment due -> awaiting posting -> fully done.
-// "Awaiting posting" is due the instant payment is confirmed, turning red after 2 days.
+// Post-sale lifecycle: ready for posting -> fully done. Turns red after 2
+// days unposted, timed from when the item was actually marked sold.
 function getSoldInfo(item) {
   if (item.status !== "sold") return null;
-  if (!item.payment_received) {
-    return { stage: "payment_due", flag: "orange", label: "Payment due", days: null };
-  }
   if (!item.posted_at) {
-    const days = daysSince(item.payment_received_at) ?? 0;
-    return { stage: "awaiting_posting", flag: days >= 2 ? "red" : "orange", label: "Awaiting posting", days };
+    const days = daysSince(item.sold_at) ?? 0;
+    return { stage: "ready_for_posting", flag: days >= 2 ? "red" : "orange", label: "Ready for posting", days };
   }
   return { stage: "posted", flag: "none", label: "Sold", days: null };
 }
@@ -510,10 +518,7 @@ function StockListRow({ item: e, onOpen }) {
             </div>
           )}
         </div>
-        {soldInfo?.stage === "payment_due" && (
-          <span className="text-xs text-[#A9822E] font-medium">Awaiting payment</span>
-        )}
-        {soldInfo?.stage === "awaiting_posting" && (
+        {soldInfo?.stage === "ready_for_posting" && (
           <span className={`text-xs font-medium ${soldInfo.flag === "red" ? "text-[#A63A2E]" : "text-[#A9822E]"}`}>
             Needs posting{soldInfo.days > 0 ? ` · ${soldInfo.days}d` : ""}
           </span>
@@ -753,6 +758,7 @@ export default function Home() {
   const [currentPhotos, setCurrentPhotos] = useState([]);
   const [enhancedFlags, setEnhancedFlags] = useState([]);
   const [currentBatch, setCurrentBatch] = useState("");
+  const [currentCostPrice, setCurrentCostPrice] = useState("");
   const [batchFilter, setBatchFilter] = useState("all");
   const [stockSearch, setStockSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -784,7 +790,7 @@ export default function Home() {
 
   const fetchItems = useCallback(async () => {
     const leanColumns =
-      "id, title, thumbnail, status, sale_price, cost_price, created_at, category, size, batch, ebay_listed, vinted_listed, depop_listed, ebay_listed_at, vinted_listed_at, vinted_reduced_at, relisted_at, payment_received, payment_received_at, posted_at";
+      "id, title, thumbnail, status, sale_price, cost_price, sold_at, created_at, category, size, batch, ebay_listed, vinted_listed, depop_listed, ebay_listed_at, vinted_listed_at, ebay_listed_price, vinted_listed_price, vinted_reduced_at, relisted_at, posted_at";
 
     let { data, error } = await supabase.from("items").select(leanColumns).order("created_at", { ascending: false });
 
@@ -916,6 +922,7 @@ export default function Home() {
           photos: photoUrls,
           thumbnail,
           batch: currentBatch.trim() || null,
+          cost_price: currentCostPrice === "" ? null : Number(currentCostPrice),
         })
         .select()
         .single();
@@ -1052,15 +1059,16 @@ export default function Home() {
   const openSoldForm = (item) => {
     setSoldFormFor(item);
     setSoldPriceInput(item.price_low != null ? String(item.price_low) : "");
-    setCostPriceInput("");
+    setCostPriceInput(item.cost_price != null ? String(item.cost_price) : "");
   };
 
   const confirmSold = async () => {
     if (!soldFormFor) return;
     const sale_price = soldPriceInput === "" ? null : Number(soldPriceInput);
     const cost_price = costPriceInput === "" ? null : Number(costPriceInput);
-    await supabase.from("items").update({ status: "sold", sale_price, cost_price }).eq("id", soldFormFor.id);
-    setSelectedItem({ ...soldFormFor, status: "sold", sale_price, cost_price });
+    const sold_at = new Date().toISOString();
+    await supabase.from("items").update({ status: "sold", sale_price, cost_price, sold_at }).eq("id", soldFormFor.id);
+    setSelectedItem({ ...soldFormFor, status: "sold", sale_price, cost_price, sold_at });
     setSoldFormFor(null);
     fetchItems();
   };
@@ -1072,15 +1080,42 @@ export default function Home() {
     fetchItems();
   };
 
-  const togglePlatform = async (item, field) => {
-    const newVal = !item[field];
+  const [listingPriceFor, setListingPriceFor] = useState(null); // { item, field }
+  const [listingPriceInput, setListingPriceInput] = useState("");
+
+  const setPlatformState = async (item, field, newVal, priceOverride) => {
     const dateField = `${field}_at`;
     const newDate = newVal ? new Date().toISOString() : null;
-    await supabase.from("items").update({ [field]: newVal, [dateField]: newDate }).eq("id", item.id);
-    const updated = { ...item, [field]: newVal, [dateField]: newDate };
+    const priceField = field === "ebay_listed" ? "ebay_listed_price" : field === "vinted_listed" ? "vinted_listed_price" : null;
+    const updates = { [field]: newVal, [dateField]: newDate };
+    // Clear the listed price whenever a platform is turned off, and only ever
+    // set it when turning on - so a stale price never lingers on an unlisted item.
+    if (priceField) updates[priceField] = newVal ? priceOverride ?? null : null;
+    await supabase.from("items").update(updates).eq("id", item.id);
+    const updated = { ...item, ...updates };
     setSelectedItem(updated);
-    setEditDraft((d) => (d ? { ...d, [field]: newVal, [dateField]: newDate } : d));
+    setEditDraft((d) => (d ? { ...d, ...updates } : d));
     fetchItems();
+  };
+
+  const togglePlatform = (item, field) => {
+    const turningOn = !item[field];
+    if (turningOn && (field === "ebay_listed" || field === "vinted_listed")) {
+      const priceField = field === "ebay_listed" ? "ebay_listed_price" : "vinted_listed_price";
+      setListingPriceFor({ item, field });
+      setListingPriceInput(item[priceField] != null ? String(item[priceField]) : item.price_low != null ? String(item.price_low) : "");
+      return;
+    }
+    setPlatformState(item, field, turningOn);
+  };
+
+  const confirmListingPrice = () => {
+    if (!listingPriceFor) return;
+    const { item, field } = listingPriceFor;
+    const price = listingPriceInput === "" ? null : Number(listingPriceInput);
+    setPlatformState(item, field, true, price);
+    setListingPriceFor(null);
+    setListingPriceInput("");
   };
 
   const confirmPipelineAction = async (item, field) => {
@@ -1090,10 +1125,25 @@ export default function Home() {
     fetchItems();
   };
 
-  const confirmPaymentReceived = async (item) => {
+  // Once an item is posted, its photos have done their job - clearing them
+  // out of Storage (and the DB row) frees up real space, since photos are by
+  // far the biggest thing in this app. Everything needed to look back on the
+  // sale later (price, cost, dates, title, category, size) is left untouched.
+  const confirmPosted = async (item) => {
     const now = new Date().toISOString();
-    await supabase.from("items").update({ payment_received: true, payment_received_at: now }).eq("id", item.id);
-    setSelectedItem({ ...item, payment_received: true, payment_received_at: now });
+    try {
+      const { data: files } = await supabase.storage.from(PHOTO_BUCKET).list(item.id);
+      if (files && files.length) {
+        const paths = files.map((f) => `${item.id}/${f.name}`);
+        await supabase.storage.from(PHOTO_BUCKET).remove(paths);
+      }
+    } catch (err) {
+      console.error("Failed to clear stored photos for", item.id, err);
+      // Don't block marking the item posted just because photo cleanup failed -
+      // worst case a few stray files linger in Storage, not a lost sale record.
+    }
+    await supabase.from("items").update({ posted_at: now, photos: [], thumbnail: null }).eq("id", item.id);
+    setSelectedItem({ ...item, posted_at: now, photos: [], thumbnail: null });
     fetchItems();
   };
 
@@ -1177,21 +1227,59 @@ export default function Home() {
             const soldItems = items.filter((e) => e.status === "sold");
             const activeItems = items.filter((e) => e.status !== "sold");
             const revenue = soldItems.reduce((s, e) => s + (Number(e.sale_price) || 0), 0);
-            const cost = soldItems.reduce((s, e) => s + (Number(e.cost_price) || 0), 0);
+            // Cost is money actually spent, so it's summed across every item
+            // that has a price paid recorded - not just the ones sold so far.
+            const cost = items.reduce((s, e) => s + (Number(e.cost_price) || 0), 0);
             const needsAttention = items.filter((e) => e.status === "needs_size" || e.status === "error");
             const recent = [...items].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 6);
+
+            // Monthly trends - grouped by the month an item actually sold
+            // (falling back to created_at for old sold items from before
+            // sold_at existed), so you can look back at how a given month or
+            // week performed.
+            const monthGroups = {};
+            soldItems.forEach((e) => {
+              const dateStr = e.sold_at || e.created_at;
+              if (!dateStr) return;
+              const d = new Date(dateStr);
+              const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+              if (!monthGroups[key]) monthGroups[key] = { revenue: 0, cost: 0, count: 0 };
+              monthGroups[key].revenue += Number(e.sale_price) || 0;
+              monthGroups[key].cost += Number(e.cost_price) || 0;
+              monthGroups[key].count += 1;
+            });
+            const monthTrends = Object.entries(monthGroups)
+              .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+              .slice(0, 6)
+              .map(([key, v]) => ({
+                key,
+                label: new Date(`${key}-01`).toLocaleDateString("en-GB", { month: "long", year: "numeric" }),
+                ...v,
+                profit: v.revenue - v.cost,
+              }));
+
+            // Sum of what's currently asked across active, listed items on each
+            // platform - not revenue (nothing's sold yet), just total value on the shelf.
+            const ebayListingValue = items
+              .filter((e) => e.status === "ready" && e.ebay_listed)
+              .reduce((s, e) => s + (Number(e.ebay_listed_price) || 0), 0);
+            const vintedListingValue = items
+              .filter((e) => e.status === "ready" && e.vinted_listed)
+              .reduce((s, e) => s + (Number(e.vinted_listed_price) || 0), 0);
+            const ebayListingCount = items.filter((e) => e.status === "ready" && e.ebay_listed).length;
+            const vintedListingCount = items.filter((e) => e.status === "ready" && e.vinted_listed).length;
 
             return (
               <>
                 <p className="font-serif text-2xl mb-6">Home</p>
 
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-8">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-3">
                   {[
                     { label: "Active stock", value: activeItems.length },
                     { label: "Sold", value: soldItems.length },
-                    { label: "Revenue", value: `£${revenue.toFixed(2)}` },
-                    { label: "Cost", value: `£${cost.toFixed(2)}` },
-                    { label: "Profit", value: `£${(revenue - cost).toFixed(2)}`, highlight: true },
+                    { label: "Revenue", value: fmtMoney(revenue, { signed: true }), positive: revenue > 0 },
+                    { label: "Cost", value: fmtMoney(-cost, { signed: true }), negative: cost > 0 },
+                    { label: "Profit", value: fmtMoney(revenue - cost, { signed: true }), highlight: true },
                   ].map((s) => (
                     <div
                       key={s.label}
@@ -1202,10 +1290,68 @@ export default function Home() {
                       <span className={`text-xs uppercase tracking-wide block mb-1 ${s.highlight ? "text-[#3F5E42]" : "text-[#8A7F63]"}`}>
                         {s.label}
                       </span>
-                      <span className={`font-mono text-xl ${s.highlight ? "text-[#3F5E42] font-bold" : ""}`}>{s.value}</span>
+                      <span
+                        className={`font-mono text-xl ${
+                          s.highlight
+                            ? revenue - cost >= 0
+                              ? "text-[#3F5E42] font-bold"
+                              : "text-[#A63A2E] font-bold"
+                            : s.positive
+                            ? "text-[#3F5E42]"
+                            : s.negative
+                            ? "text-[#A63A2E]"
+                            : ""
+                        }`}
+                      >
+                        {s.value}
+                      </span>
                     </div>
                   ))}
                 </div>
+
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  <div className={`rounded-sm p-3 border ${CATEGORY_STYLES.ebay.tint}`}>
+                    <span className={`text-xs uppercase tracking-wide block mb-1 ${CATEGORY_STYLES.ebay.text}`}>
+                      Current eBay listings ({ebayListingCount})
+                    </span>
+                    <span className={`font-mono text-xl font-bold ${CATEGORY_STYLES.ebay.text}`}>
+                      £{ebayListingValue.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className={`rounded-sm p-3 border ${CATEGORY_STYLES.vinted.tint}`}>
+                    <span className={`text-xs uppercase tracking-wide block mb-1 ${CATEGORY_STYLES.vinted.text}`}>
+                      Current Vinted listings ({vintedListingCount})
+                    </span>
+                    <span className={`font-mono text-xl font-bold ${CATEGORY_STYLES.vinted.text}`}>
+                      £{vintedListingValue.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+
+                {monthTrends.length > 0 && (
+                  <div className="mb-8">
+                    <p className="text-xs font-semibold text-[#8A7F63] uppercase tracking-wide mb-2">
+                      Monthly trends
+                    </p>
+                    <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm divide-y divide-[#C9BFA3]">
+                      {monthTrends.map((m) => (
+                        <div key={m.key} className="flex items-center justify-between px-3 py-2.5">
+                          <div>
+                            <span className="text-sm font-medium block">{m.label}</span>
+                            <span className="text-xs text-[#8A7F63]">{m.count} item{m.count === 1 ? "" : "s"} sold</span>
+                          </div>
+                          <div className="flex items-center gap-4 font-mono text-sm">
+                            <span className="text-[#3F5E42]">{fmtMoney(m.revenue, { signed: true })}</span>
+                            <span className="text-[#A63A2E]">{fmtMoney(-m.cost, { signed: true })}</span>
+                            <span className={`font-bold ${m.profit >= 0 ? "text-[#3F5E42]" : "text-[#A63A2E]"}`}>
+                              {fmtMoney(m.profit, { signed: true })}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <div className="flex gap-2 mb-8">
                   <button
@@ -1276,7 +1422,7 @@ export default function Home() {
               .filter((e) => e.status === "ready" || e.status === "sold")
               .map((e) => ({ ...e, _category: getListingCategory(e) }));
 
-            const CATEGORY_ORDER = ["unlisted", "ebay", "vinted", "both", "sold", "ready_for_posting", "payment_due"];
+            const CATEGORY_ORDER = ["unlisted", "ebay", "vinted", "both", "sold", "ready_for_posting"];
             const categoryCounts = {};
             categorized.forEach((e) => {
               if (e._category) categoryCounts[e._category] = (categoryCounts[e._category] || 0) + 1;
@@ -1390,6 +1536,24 @@ export default function Home() {
             {currentBatch && (
               <p className="text-xs text-[#8A7F63] mt-1">
                 Every item you capture will be tagged "{currentBatch}" until you change or clear this.
+              </p>
+            )}
+          </div>
+
+          <div className="mb-4">
+            <label className="text-xs text-[#8A7F63] uppercase tracking-wide mb-1 block">
+              Price paid (£) — optional, for profit tracking
+            </label>
+            <input
+              type="number"
+              value={currentCostPrice}
+              onChange={(e) => setCurrentCostPrice(e.target.value)}
+              placeholder="Leave blank if unknown"
+              className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
+            />
+            {currentCostPrice && (
+              <p className="text-xs text-[#8A7F63] mt-1">
+                Every item you capture will use £{currentCostPrice} until you change or clear this — handy for box price ÷ number of items.
               </p>
             )}
           </div>
@@ -1665,7 +1829,7 @@ export default function Home() {
 
             {selectedItem.status === "sold" && (
               <div className="flex flex-col gap-4">
-                <div className={`rounded-sm border p-4 ${selectedItem.payment_received ? "bg-[#F7F3E8] border-[#C9BFA3]" : "bg-[#A9822E]/15 border-[#A9822E]"}`}>
+                <div className={`rounded-sm border p-4 ${selectedItem.posted_at ? "bg-[#3F5E42]/10 border-[#3F5E42]/40" : "bg-[#A63A2E]/10 border-[#A63A2E]/40"}`}>
                   <p className="text-sm text-[#2B2620] font-medium mb-3">{selectedItem.title}</p>
                   <div className="flex flex-wrap gap-x-6 gap-y-2 font-mono text-sm">
                     <div>
@@ -1682,34 +1846,28 @@ export default function Home() {
                         <span className="text-[#3F5E42] font-bold">£{(selectedItem.sale_price - selectedItem.cost_price).toFixed(2)}</span>
                       </div>
                     )}
-                    <div>
-                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Payment</span>
-                      <span className={selectedItem.payment_received ? "text-[#3F5E42] font-bold" : "text-[#A9822E] font-bold"}>
-                        {selectedItem.payment_received ? "Received" : "Outstanding"}
-                      </span>
-                    </div>
-                    {selectedItem.payment_received && (
+                    {selectedItem.sold_at && (
                       <div>
-                        <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Posting</span>
-                        <span className={selectedItem.posted_at ? "text-[#3F5E42] font-bold" : "text-[#A9822E] font-bold"}>
-                          {selectedItem.posted_at ? "Posted" : "Needs posting"}
-                        </span>
+                        <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Sold on</span>
+                        <span>{fmtDate(selectedItem.sold_at)}</span>
                       </div>
                     )}
+                    <div>
+                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Posting</span>
+                      <span className={selectedItem.posted_at ? "text-[#3F5E42] font-bold" : "text-[#A63A2E] font-bold"}>
+                        {selectedItem.posted_at ? `Posted ${fmtDate(selectedItem.posted_at)}` : "Ready for posting"}
+                      </span>
+                    </div>
                   </div>
+                  {selectedItem.posted_at && (
+                    <p className="text-xs text-[#8A7F63] mt-3">
+                      Photos were cleared to free up storage once this was posted — the sale record above (price, cost, dates) is kept for good.
+                    </p>
+                  )}
                 </div>
-                {!selectedItem.payment_received && (
+                {!selectedItem.posted_at && (
                   <button
-                    onClick={() => confirmPaymentReceived(selectedItem)}
-                    className="w-full py-2.5 rounded bg-[#A9822E] text-white font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
-                  >
-                    <Check size={15} />
-                    Confirm payment received
-                  </button>
-                )}
-                {selectedItem.payment_received && !selectedItem.posted_at && (
-                  <button
-                    onClick={() => confirmPipelineAction(selectedItem, "posted_at")}
+                    onClick={() => confirmPosted(selectedItem)}
                     className="w-full py-2.5 rounded bg-[#A9822E] text-white font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
                   >
                     <Check size={15} />
@@ -1763,6 +1921,44 @@ export default function Home() {
                       className="flex-1 py-2.5 rounded bg-[#A9822E] text-[#2B2620] font-bold"
                     >
                       Confirm
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {listingPriceFor && (
+              <div className="fixed inset-0 bg-[#2B2620]/60 z-30 flex items-end sm:items-center justify-center p-4">
+                <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-5 w-full max-w-sm">
+                  <p className="font-serif text-lg mb-1">
+                    List "{listingPriceFor.item.title}" on {listingPriceFor.field === "ebay_listed" ? "eBay" : "Vinted"}
+                  </p>
+                  <p className="text-xs text-[#8A7F63] mb-4">What price did you list it at?</p>
+                  <div>
+                    <label className="text-xs text-[#8A7F63] mb-1 block">Listed price (£)</label>
+                    <input
+                      type="number"
+                      value={listingPriceInput}
+                      onChange={(e) => setListingPriceInput(e.target.value)}
+                      className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
+                      autoFocus
+                    />
+                  </div>
+                  <div className="flex gap-2 mt-5">
+                    <button
+                      onClick={() => {
+                        setListingPriceFor(null);
+                        setListingPriceInput("");
+                      }}
+                      className="flex-1 py-2.5 rounded bg-[#DCD4BC] text-[#2B2620] font-medium"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={confirmListingPrice}
+                      className="flex-1 py-2.5 rounded bg-[#A9822E] text-[#2B2620] font-bold"
+                    >
+                      Confirm listing
                     </button>
                   </div>
                 </div>
