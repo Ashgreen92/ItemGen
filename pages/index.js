@@ -228,7 +228,7 @@ const CATEGORY_STYLES = {
   unlisted: { label: "Unlisted", solid: "bg-[#6B6250] text-white", tint: "bg-[#6B6250]/15 border-[#6B6250]/40", fillMedium: "bg-[#6B6250]/35 border-[#6B6250]", text: "text-[#6B6250]", accent: "border-l-[#6B6250]" },
   ebay: { label: "Listed on eBay", solid: "bg-[#3B6E91] text-white", tint: "bg-[#3B6E91]/15 border-[#3B6E91]/40", fillMedium: "bg-[#3B6E91]/35 border-[#3B6E91]", text: "text-[#3B6E91]", accent: "border-l-[#3B6E91]" },
   vinted: { label: "Listed on Vinted", solid: "bg-[#7A5980] text-white", tint: "bg-[#7A5980]/15 border-[#7A5980]/40", fillMedium: "bg-[#7A5980]/35 border-[#7A5980]", text: "text-[#7A5980]", accent: "border-l-[#7A5980]" },
-  both: { label: "Listed on both", solid: "bg-[#B8860B] text-[#2B2620]", tint: "bg-[#B8860B]/15 border-[#B8860B]/40", fillMedium: "bg-[#B8860B]/35 border-[#B8860B]", text: "text-[#B8860B]", accent: "border-l-[#B8860B]" },
+  both: { label: "Listed on both", solid: "bg-[#1D7A6E] text-white", tint: "bg-[#1D7A6E]/15 border-[#1D7A6E]/40", fillMedium: "bg-[#1D7A6E]/35 border-[#1D7A6E]", text: "text-[#1D7A6E]", accent: "border-l-[#1D7A6E]" },
   sold: { label: "Sold", solid: "bg-[#3F5E42] text-white", tint: "bg-[#3F5E42]/15 border-[#3F5E42]/40", fillMedium: "bg-[#3F5E42]/35 border-[#3F5E42]", text: "text-[#3F5E42]", accent: "border-l-[#3F5E42]" },
   ready_for_posting: { label: "Ready for posting", solid: "bg-[#A63A2E] text-white", tint: "bg-[#A63A2E]/15 border-[#A63A2E]/40", fillMedium: "bg-[#A63A2E]/35 border-[#A63A2E]", text: "text-[#A63A2E]", accent: "border-l-[#A63A2E]" },
 };
@@ -510,13 +510,6 @@ function StockListRow({ item: e, onOpen }) {
           <span className="text-xs font-mono text-[#2B2620] font-semibold">
             #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
           </span>
-          {pipeline && pipeline.stage !== "not_listed" && (
-            <span className={`inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm ${
-              pipeline.flag === "none" ? "bg-[#2B2620]/10 text-[#2B2620]" : flagStyle.badge
-            }`}>
-              {PIPELINE_STAGES[pipeline.stage].label} · Day {pipeline.days}
-            </span>
-          )}
           {isListed && (
             <div className="flex gap-0.5">
               {e.ebay_listed && (
@@ -1494,7 +1487,7 @@ export default function Home() {
                 <div className="flex flex-wrap gap-2 mb-5">
                   <button
                     onClick={() => setPipelineFilter("all")}
-                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold border-2 transition bg-[#A9822E] text-[#2B2620] ${
+                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold border-2 transition bg-[#8A6116] text-white ${
                       pipelineFilter === "all" ? "border-[#2B2620]" : "border-transparent"
                     }`}
                   >
