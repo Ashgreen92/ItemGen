@@ -225,12 +225,12 @@ function BackgroundSunflower() {
 // Status. "both" (eBay + Vinted) gets its own colour rather than reusing
 // either single-platform colour, so it's never mistaken for just one of them.
 const CATEGORY_STYLES = {
-  unlisted: { label: "Unlisted", solid: "bg-[#6B6250] text-white", tint: "bg-[#6B6250]/15 border-[#6B6250]/40", text: "text-[#6B6250]" },
-  ebay: { label: "Listed on eBay", solid: "bg-[#3B6E91] text-white", tint: "bg-[#3B6E91]/15 border-[#3B6E91]/40", text: "text-[#3B6E91]" },
-  vinted: { label: "Listed on Vinted", solid: "bg-[#7A5980] text-white", tint: "bg-[#7A5980]/15 border-[#7A5980]/40", text: "text-[#7A5980]" },
-  both: { label: "Listed on both", solid: "bg-[#B8860B] text-white", tint: "bg-[#B8860B]/15 border-[#B8860B]/40", text: "text-[#B8860B]" },
-  sold: { label: "Sold", solid: "bg-[#3F5E42] text-white", tint: "bg-[#3F5E42]/15 border-[#3F5E42]/40", text: "text-[#3F5E42]" },
-  ready_for_posting: { label: "Ready for posting", solid: "bg-[#A63A2E] text-white", tint: "bg-[#A63A2E]/15 border-[#A63A2E]/40", text: "text-[#A63A2E]" },
+  unlisted: { label: "Unlisted", solid: "bg-[#6B6250] text-white", tint: "bg-[#6B6250]/15 border-[#6B6250]/40", text: "text-[#6B6250]", accent: "border-l-[#6B6250]" },
+  ebay: { label: "Listed on eBay", solid: "bg-[#3B6E91] text-white", tint: "bg-[#3B6E91]/15 border-[#3B6E91]/40", text: "text-[#3B6E91]", accent: "border-l-[#3B6E91]" },
+  vinted: { label: "Listed on Vinted", solid: "bg-[#7A5980] text-white", tint: "bg-[#7A5980]/15 border-[#7A5980]/40", text: "text-[#7A5980]", accent: "border-l-[#7A5980]" },
+  both: { label: "Listed on both", solid: "bg-[#B8860B] text-white", tint: "bg-[#B8860B]/15 border-[#B8860B]/40", text: "text-[#B8860B]", accent: "border-l-[#B8860B]" },
+  sold: { label: "Sold", solid: "bg-[#3F5E42] text-white", tint: "bg-[#3F5E42]/15 border-[#3F5E42]/40", text: "text-[#3F5E42]", accent: "border-l-[#3F5E42]" },
+  ready_for_posting: { label: "Ready for posting", solid: "bg-[#A63A2E] text-white", tint: "bg-[#A63A2E]/15 border-[#A63A2E]/40", text: "text-[#A63A2E]", accent: "border-l-[#A63A2E]" },
 };
 
 // Works out which colour category an item belongs in. Active items are
@@ -387,9 +387,9 @@ const PIPELINE_STAGES = {
 };
 
 const FLAG_STYLES = {
-  none: { badge: "", card: "bg-[#F7F3E8] border-[#C9BFA3]" },
-  orange: { badge: "bg-[#A9822E] text-white", card: "bg-[#A9822E]/15 border-[#A9822E]" },
-  red: { badge: "bg-[#A63A2E] text-white", card: "bg-[#A63A2E]/15 border-[#A63A2E]" },
+  none: { badge: "", card: "bg-[#F7F3E8] border-[#C9BFA3]", accent: "" },
+  orange: { badge: "bg-[#A9822E] text-white", card: "bg-[#A9822E]/15 border-[#A9822E]", accent: "border-l-[#A9822E]" },
+  red: { badge: "bg-[#A63A2E] text-white", card: "bg-[#A63A2E]/15 border-[#A63A2E]", accent: "border-l-[#A63A2E]" },
 };
 
 function daysSince(iso) {
@@ -463,12 +463,11 @@ function StockListRow({ item: e, onOpen }) {
   // An overdue pipeline flag (red/orange, from the day-counter) takes visual
   // priority over the plain category colour, since it's a "do something now"
   // signal rather than just a status label - otherwise, colour by category.
-  const cardCls =
-    pipeline && pipeline.flag !== "none"
-      ? flagStyle.card
-      : categoryStyle
-      ? categoryStyle.tint
-      : "bg-[#F7F3E8] border-[#C9BFA3]";
+  // Always a plain, light background - only the left border carries colour,
+  // so title/price/metadata text stays high-contrast regardless of category.
+  const accentCls =
+    pipeline && pipeline.flag !== "none" ? flagStyle.accent : categoryStyle ? categoryStyle.accent : "";
+  const cardCls = accentCls ? `bg-[#F7F3E8] border-[#C9BFA3] border-l-4 ${accentCls}` : "bg-[#F7F3E8] border-[#C9BFA3]";
 
   return (
     <button
@@ -487,24 +486,24 @@ function StockListRow({ item: e, onOpen }) {
       </div>
 
       <div className="flex-1 min-w-0">
-        <div className="font-medium text-sm truncate">{e.title}</div>
-        <div className="text-xs text-[#8A7F63] mt-0.5">Added {timeAgo(e.created_at)}</div>
+        <div className="font-medium text-sm truncate text-[#2B2620]">{e.title}</div>
+        <div className="text-xs text-[#6B6250] mt-0.5">Added {timeAgo(e.created_at)}</div>
         <div className="flex items-center gap-2 flex-wrap mt-1.5">
           <StatusBadge item={e} />
           {(e.quantity || 1) > 1 && (
-            <span className="inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#8A7F63]/15 text-[#6B6250]">
+            <span className="inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#6B6250]/20 text-[#4A4436] font-bold">
               {e.status === "sold" ? `×${e.quantity}` : `${(e.quantity || 1) - (e.quantity_sold || 0)} of ${e.quantity} left`}
             </span>
           )}
           {e.status === "sold" && e.sale_price != null && (
-            <span className="text-[#3F5E42] font-mono font-semibold text-sm">£{e.sale_price}</span>
+            <span className="text-[#2B2620] font-mono font-bold text-sm">£{e.sale_price}</span>
           )}
-          <span className="text-xs font-mono text-[#8A7F63]">
+          <span className="text-xs font-mono text-[#6B6250] font-medium">
             #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
           </span>
           {pipeline && pipeline.stage !== "not_listed" && (
             <span className={`inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm ${
-              pipeline.flag === "none" ? "bg-[#8A7F63]/15 text-[#6B6250]" : flagStyle.badge
+              pipeline.flag === "none" ? "bg-[#6B6250]/20 text-[#4A4436]" : flagStyle.badge
             }`}>
               {PIPELINE_STAGES[pipeline.stage].label} · Day {pipeline.days}
             </span>
@@ -512,25 +511,25 @@ function StockListRow({ item: e, onOpen }) {
           {isListed && (
             <div className="flex gap-0.5">
               {e.ebay_listed && (
-                <span className="w-4 h-4 rounded-sm bg-[#3F5E42]/15 text-[#3F5E42] text-[8px] font-bold flex items-center justify-center" title="eBay">EB</span>
+                <span className="w-4 h-4 rounded-sm bg-[#3B6E91] text-white text-[8px] font-bold flex items-center justify-center" title="eBay">EB</span>
               )}
               {e.vinted_listed && (
-                <span className="w-4 h-4 rounded-sm bg-[#3F5E42]/15 text-[#3F5E42] text-[8px] font-bold flex items-center justify-center" title="Vinted">VI</span>
+                <span className="w-4 h-4 rounded-sm bg-[#7A5980] text-white text-[8px] font-bold flex items-center justify-center" title="Vinted">VI</span>
               )}
               {e.depop_listed && (
-                <span className="w-4 h-4 rounded-sm bg-[#3F5E42]/15 text-[#3F5E42] text-[8px] font-bold flex items-center justify-center" title="Depop">DE</span>
+                <span className="w-4 h-4 rounded-sm bg-[#6B6250] text-white text-[8px] font-bold flex items-center justify-center" title="Depop">DE</span>
               )}
             </div>
           )}
         </div>
         {soldInfo?.stage === "ready_for_posting" && (
-          <span className={`text-xs font-medium ${soldInfo.flag === "red" ? "text-[#A63A2E]" : "text-[#A9822E]"}`}>
+          <span className={`text-xs font-bold ${soldInfo.flag === "red" ? "text-[#A63A2E]" : "text-[#8A5A1E]"}`}>
             Needs posting{soldInfo.days > 0 ? ` · ${soldInfo.days}d` : ""}
           </span>
         )}
       </div>
 
-      <span className="text-[#8A7F63] text-lg shrink-0">›</span>
+      <span className="text-[#6B6250] text-lg shrink-0">›</span>
     </button>
   );
 }
