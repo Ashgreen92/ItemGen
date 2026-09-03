@@ -1357,6 +1357,12 @@ export default function Home() {
               Bundles
             </button>
             <button
+              onClick={() => setView("sold")}
+              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "sold" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
+            >
+              Sold
+            </button>
+            <button
               onClick={() => setView("finances")}
               className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "finances" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
             >
@@ -1418,6 +1424,7 @@ export default function Home() {
             { key: "stock", label: `Stock${items.length > 0 ? ` (${items.length})` : ""}` },
             { key: "pipeline", label: "Item status" },
             { key: "bundles", label: "Bundles" },
+            { key: "sold", label: "Sold" },
             { key: "finances", label: "Finances" },
           ].map((item) => (
             <button
@@ -1654,13 +1661,14 @@ export default function Home() {
       {view === "pipeline" && (
         <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
           {(() => {
-            // Everything currently active (listed or not) or sold, tagged with
-            // the same colour category used for the badges/cards in Stock.
+            // Everything currently active (listed or not), plus sold items
+            // still waiting to be posted - fully-done sold items live in
+            // their own Sold view instead, not mixed in here.
             const categorized = items
-              .filter((e) => e.status === "ready" || e.status === "sold")
+              .filter((e) => e.status === "ready" || (e.status === "sold" && !e.posted_at))
               .map((e) => ({ ...e, _category: getListingCategory(e) }));
 
-            const CATEGORY_ORDER = ["unlisted", "ebay", "vinted", "both", "sold", "ready_for_posting"];
+            const CATEGORY_ORDER = ["unlisted", "ebay", "vinted", "both", "ready_for_posting"];
             const categoryCounts = {};
             categorized.forEach((e) => {
               if (e._category) categoryCounts[e._category] = (categoryCounts[e._category] || 0) + 1;
@@ -1756,6 +1764,35 @@ export default function Home() {
                           ))}
                         </div>
                       </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {view === "sold" && (
+        <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
+          {(() => {
+            const soldArchive = items
+              .filter((e) => e.status === "sold" && e.posted_at)
+              .sort((a, b) => new Date(b.sold_at || b.posted_at) - new Date(a.sold_at || a.posted_at));
+
+            return (
+              <>
+                <p className="font-serif text-2xl mb-1">Sold</p>
+                <p className="text-sm text-[#8A7F63] mb-5">
+                  Everything sold and posted — a permanent record, photos cleared.
+                </p>
+
+                {soldArchive.length === 0 ? (
+                  <p className="text-sm text-[#8A7F63] py-8 text-center">Nothing sold and posted yet.</p>
+                ) : (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                    {soldArchive.map((e) => (
+                      <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />
                     ))}
                   </div>
                 )}
