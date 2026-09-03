@@ -607,7 +607,9 @@ function StockListRow({ item: e, onOpen, onDelete }) {
 
 function ListingHelper({ item }) {
   const priceLabel =
-    item.price_low === item.price_high || item.price_high == null
+    item.recommended_price != null
+      ? `£${item.recommended_price}`
+      : item.price_low === item.price_high || item.price_high == null
       ? `£${item.price_low ?? "—"}`
       : `£${item.price_low}–£${item.price_high}`;
 
@@ -931,6 +933,9 @@ export default function Home() {
           brand: result.brand || "",
           price_low: result.estimated_price_low ?? null,
           price_high: result.estimated_price_high ?? null,
+          recommended_price: result.recommended_price ?? null,
+          comparable_count: result.comparable_count ?? null,
+          price_confidence: result.price_confidence || null,
           confidence: result.confidence || "medium",
           notes: result.notes || "",
           verify_before_listing: Array.isArray(result.verify_before_listing) ? result.verify_before_listing : [],
@@ -1147,7 +1152,7 @@ export default function Home() {
 
   const openSoldForm = (item) => {
     setSoldFormFor(item);
-    setSoldPriceInput(item.price_low != null ? String(item.price_low) : "");
+    setSoldPriceInput(item.recommended_price != null ? String(item.recommended_price) : item.price_low != null ? String(item.price_low) : "");
     setCostPriceInput(item.cost_price != null ? String(item.cost_price) : "");
     // Default to selling every remaining unit - matches "last item sold we
     // had 2 sold" being the common case; partial sales are the exception.
@@ -2050,9 +2055,19 @@ export default function Home() {
                     {selectedItem.used_real_ebay_data ? "Real eBay data" : "AI estimate"}
                   </span>
                 </div>
+
+                {selectedItem.recommended_price != null ? (
+                  <div className="mb-3">
+                    <span className="text-[#8A7F63] text-xs block">Recommended price</span>
+                    <span className="font-mono text-2xl font-bold text-[#2B2620]">£{selectedItem.recommended_price}</span>
+                  </div>
+                ) : null}
+
                 <div className="flex flex-wrap gap-x-6 gap-y-2 font-mono text-sm mb-2">
                   <div>
-                    <span className="text-[#8A7F63] text-xs block">eBay est.</span>
+                    <span className="text-[#8A7F63] text-xs block">
+                      {selectedItem.recommended_price != null ? "Likely range" : "eBay est."}
+                    </span>
                     <span>{selectedItem.price_low != null ? `£${selectedItem.price_low}–£${selectedItem.price_high}` : "Unknown"}</span>
                   </div>
                   <div>
@@ -2063,6 +2078,26 @@ export default function Home() {
                     <span className="text-[#8A7F63] text-xs block">Active on eBay now</span>
                     <span>{selectedItem.ebay_active_listings != null ? selectedItem.ebay_active_listings : "Unknown"}</span>
                   </div>
+                  {selectedItem.comparable_count != null && (
+                    <div>
+                      <span className="text-[#8A7F63] text-xs block">Strong matches</span>
+                      <span>{selectedItem.comparable_count}</span>
+                    </div>
+                  )}
+                  {selectedItem.price_confidence && (
+                    <div>
+                      <span className="text-[#8A7F63] text-xs block">Price confidence</span>
+                      <span className={
+                        selectedItem.price_confidence === "High"
+                          ? "text-[#3F5E42] font-bold"
+                          : selectedItem.price_confidence === "Medium"
+                          ? "text-[#A9822E] font-bold"
+                          : "text-[#A63A2E] font-bold"
+                      }>
+                        {selectedItem.price_confidence}
+                      </span>
+                    </div>
+                  )}
                 </div>
                 <p className="text-sm text-[#2B2620]">
                   {selectedItem.listing_recommendation || "No recommendation returned for this item."}
