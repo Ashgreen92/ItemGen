@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download, Settings as SettingsIcon } from "lucide-react";
+import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download, Settings as SettingsIcon, Menu } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
 const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra"];
@@ -408,6 +408,13 @@ function daysSince(iso) {
   return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
 }
 
+function isStaleListing(item) {
+  if (item.status !== "ready") return false;
+  const firstListedAt = [item.ebay_listed_at, item.vinted_listed_at].filter(Boolean).sort()[0];
+  if (!firstListedAt) return false;
+  return daysSince(firstListedAt) >= 30;
+}
+
 // Post-sale lifecycle: ready for posting -> fully done. Turns red after 2
 // days unposted, timed from when the item was actually marked sold.
 function getSoldInfo(item) {
@@ -509,7 +516,9 @@ function StockListRow({ item: e, onOpen, onDelete }) {
 
       <div className="flex-1 min-w-0">
         <div className="font-bold text-sm truncate text-[#2B2620]">{e.title}</div>
-        <div className="text-xs text-[#3A3428] font-semibold mt-0.5">Added {timeAgo(e.created_at)}</div>
+        <div className="text-xs text-[#3A3428] font-semibold mt-0.5">
+          {e.status === "sold" && e.sold_at ? `Sold ${fmtDate(e.sold_at)}` : `Added ${timeAgo(e.created_at)}`}
+        </div>
 
         {isFullyDone ? (
           <div className="flex items-center gap-3 flex-wrap mt-1.5 font-mono text-xs text-[#2B2620] font-semibold">
@@ -828,6 +837,7 @@ export default function Home() {
   const [batchFilter, setBatchFilter] = useState("all");
   const [stockSearch, setStockSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [pipelineFilter, setPipelineFilter] = useState("all");
   const [capturing, setCapturing] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
@@ -1315,7 +1325,7 @@ export default function Home() {
           <span className="font-serif text-xl tracking-tight">ItemGen</span>
         </div>
         <div className="flex items-center gap-2">
-          <div className="flex flex-wrap bg-[#F7F3E8] rounded-sm p-0.5 border border-[#C9BFA3] gap-y-0.5">
+          <div className="hidden sm:flex bg-[#F7F3E8] rounded-sm p-0.5 border border-[#C9BFA3]">
             <button
               onClick={() => setView("dashboard")}
               className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "dashboard" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
@@ -1346,7 +1356,21 @@ export default function Home() {
             >
               Bundles
             </button>
+            <button
+              onClick={() => setView("finances")}
+              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "finances" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
+            >
+              Finances
+            </button>
           </div>
+
+          <button
+            onClick={() => setMobileMenuOpen((o) => !o)}
+            className="sm:hidden w-8 h-8 flex items-center justify-center rounded-sm border border-[#C9BFA3] bg-[#F7F3E8] text-[#2B2620]"
+            title="Menu"
+          >
+            <Menu size={16} />
+          </button>
 
           <div className="relative">
             <button
@@ -1386,11 +1410,110 @@ export default function Home() {
         </div>
       </div>
 
+      {mobileMenuOpen && (
+        <div className="sm:hidden border-b border-[#C9BFA3] bg-[#F7F3E8] px-3 py-2 flex flex-col sticky top-[57px] z-10">
+          {[
+            { key: "dashboard", label: "Home" },
+            { key: "capture", label: "Upload new" },
+            { key: "stock", label: `Stock${items.length > 0 ? ` (${items.length})` : ""}` },
+            { key: "pipeline", label: "Item status" },
+            { key: "bundles", label: "Bundles" },
+            { key: "finances", label: "Finances" },
+          ].map((item) => (
+            <button
+              key={item.key}
+              onClick={() => {
+                setView(item.key);
+                setMobileMenuOpen(false);
+              }}
+              className={`text-left px-2 py-2.5 rounded-sm text-sm font-bold ${
+                view === item.key ? "bg-[#A9822E] text-[#2B2620]" : "text-[#2B2620]"
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {view === "dashboard" && (
         <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
           {(() => {
             const soldItems = items.filter((e) => e.status === "sold");
             const activeItems = items.filter((e) => e.status !== "sold");
+            // Needs Attention covers everything that's genuinely stuck:
+            // needs_size/error block a listing from happening at all,
+            // ready_for_posting is a sold item waiting on you, and stale
+            // catches stock that's been listed 30+ days without selling.
+            const needsAttention = items
+              .filter((e) => e.status === "needs_size" || e.status === "error" || (e.status === "sold" && !e.posted_at) || isStaleListing(e))
+              .map((e) => ({
+                ...e,
+                _reason:
+                  e.status === "needs_size" || e.status === "error"
+                    ? "status"
+                    : e.status === "sold"
+                    ? "ready_for_posting"
+                    : "stale",
+              }));
+
+            return (
+              <>
+                <p className="font-serif text-2xl mb-6">Home</p>
+
+                <div className="grid grid-cols-2 gap-3 mb-8">
+                  <div className="rounded-sm p-3 border bg-[#F7F3E8] border-[#C9BFA3]">
+                    <span className="text-xs uppercase tracking-wide block mb-1 text-[#8A7F63]">Active stock</span>
+                    <span className="font-mono text-xl">{activeItems.length}</span>
+                  </div>
+                  <div className="rounded-sm p-3 border bg-[#F7F3E8] border-[#C9BFA3]">
+                    <span className="text-xs uppercase tracking-wide block mb-1 text-[#8A7F63]">Sold</span>
+                    <span className="font-mono text-xl">{soldItems.length}</span>
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-xs font-semibold text-[#A63A2E] uppercase tracking-wide mb-2">
+                    Needs attention {needsAttention.length > 0 && `(${needsAttention.length})`}
+                  </p>
+                  {needsAttention.length === 0 ? (
+                    <div className="flex items-center gap-2 py-4 text-[#8A7F63]">
+                      <SunflowerIcon size={16} className="opacity-40" />
+                      <span className="text-sm">Nothing needs attention right now.</span>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-2">
+                      {needsAttention.map((e) => (
+                        <button
+                          key={e.id}
+                          onClick={() => openItem(e)}
+                          className="flex items-center gap-3 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-2.5 text-left"
+                        >
+                          <div className="w-10 h-10 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0">
+                            {e.thumbnail && <img src={e.thumbnail} alt="" className="w-full h-full object-cover" />}
+                          </div>
+                          <span className="text-sm truncate flex-1">{e.title}</span>
+                          {e._reason === "stale" ? (
+                            <span className="inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm bg-[#A63A2E] text-white">
+                              Not selling
+                            </span>
+                          ) : (
+                            <StatusBadge item={e} />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {view === "finances" && (
+        <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
+          {(() => {
             // Revenue comes from units actually sold (effectiveQuantitySold),
             // which can be >0 on a "ready" item too if only some of its
             // quantity has sold so far - not just fully-sold items.
@@ -1398,8 +1521,6 @@ export default function Home() {
             // Cost is money actually spent - per-unit cost × total quantity
             // ever captured for that item, summed across every item.
             const cost = items.reduce((s, e) => s + (Number(e.cost_price) || 0) * (Number(e.quantity) || 1), 0);
-            const needsAttention = items.filter((e) => e.status === "needs_size" || e.status === "error");
-            const recent = [...items].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 6);
 
             // Monthly trends - grouped by the month an item was last sold
             // (falling back to created_at for old sold items from before
@@ -1444,12 +1565,10 @@ export default function Home() {
 
             return (
               <>
-                <p className="font-serif text-2xl mb-6">Home</p>
+                <p className="font-serif text-2xl mb-6">Finances</p>
 
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-3">
+                <div className="grid grid-cols-3 gap-3 mb-3">
                   {[
-                    { label: "Active stock", value: activeItems.length },
-                    { label: "Sold", value: soldItems.length },
                     { label: "Revenue", value: fmtMoney(revenue, { signed: true }), positive: revenue > 0 },
                     { label: "Cost", value: fmtMoney(-cost, { signed: true }), negative: cost > 0 },
                     { label: "Profit", value: fmtMoney(revenue - cost, { signed: true }), highlight: true },
@@ -1482,7 +1601,7 @@ export default function Home() {
                   ))}
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 mb-3">
+                <div className="grid grid-cols-2 gap-3 mb-8">
                   <div className={`rounded-sm p-3 border ${CATEGORY_STYLES.ebay.tint}`}>
                     <span className={`text-xs uppercase tracking-wide block mb-1 ${CATEGORY_STYLES.ebay.text}`}>
                       Current eBay listings ({ebayListingCount})
@@ -1501,11 +1620,11 @@ export default function Home() {
                   </div>
                 </div>
 
-                {monthTrends.length > 0 && (
-                  <div className="mb-8">
-                    <p className="text-xs font-semibold text-[#8A7F63] uppercase tracking-wide mb-2">
-                      Monthly trends
-                    </p>
+                {monthTrends.length === 0 ? (
+                  <p className="text-sm text-[#8A7F63] py-8 text-center">No sales yet to show trends for.</p>
+                ) : (
+                  <div>
+                    <p className="text-xs font-semibold text-[#8A7F63] uppercase tracking-wide mb-2">Monthly trends</p>
                     <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm divide-y divide-[#C9BFA3]">
                       {monthTrends.map((m) => (
                         <div key={m.key} className="flex items-center justify-between px-3 py-2.5">
@@ -1525,66 +1644,12 @@ export default function Home() {
                     </div>
                   </div>
                 )}
-
-                <div className="flex gap-2 mb-8">
-                  <button
-                    onClick={() => setView("capture")}
-                    className="flex-1 py-3 rounded bg-[#A9822E] text-[#2B2620] font-bold flex items-center justify-center gap-2"
-                  >
-                    <Camera size={16} />
-                    Upload New Item
-                  </button>
-                  <button
-                    onClick={() => {
-                      setStockFilter("active");
-                      setBatchFilter("all");
-                      setStockSearch("");
-                      setView("stock");
-                    }}
-                    className="flex-1 py-3 rounded bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-medium"
-                  >
-                    View All Items
-                  </button>
-                </div>
-
-                {needsAttention.length > 0 && (
-                  <div className="mb-8">
-                    <p className="text-xs font-semibold text-[#A63A2E] uppercase tracking-wide mb-2">
-                      Needs attention ({needsAttention.length})
-                    </p>
-                    <div className="flex flex-col gap-2">
-                      {needsAttention.map((e) => (
-                        <button
-                          key={e.id}
-                          onClick={() => openItem(e)}
-                          className="flex items-center gap-3 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-2.5 text-left"
-                        >
-                          <div className="w-10 h-10 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0">
-                            {e.thumbnail && <img src={e.thumbnail} alt="" className="w-full h-full object-cover" />}
-                          </div>
-                          <span className="text-sm truncate flex-1">{e.title}</span>
-                          <StatusBadge item={e} />
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {recent.length > 0 && (
-                  <div>
-                    <p className="text-xs font-semibold text-[#8A7F63] uppercase tracking-wide mb-2">Recently captured</p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {recent.map((e) => (
-                        <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />
-                      ))}
-                    </div>
-                  </div>
-                )}
               </>
             );
           })()}
         </div>
       )}
+
 
       {view === "pipeline" && (
         <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
