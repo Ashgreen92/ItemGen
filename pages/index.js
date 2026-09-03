@@ -340,6 +340,17 @@ function fmtMoney(amount, { signed = false } = {}) {
   return `${v > 0 ? "+" : "-"}£${abs}`;
 }
 
+// Items marked sold before the quantity_sold column existed backfilled to 0
+// when the column was added, silently zeroing their revenue - status "sold"
+// has always meant everything sold, so that's what gets assumed when
+// quantity_sold reads 0 on an already-sold item.
+function effectiveQuantitySold(item) {
+  const qs = Number(item.quantity_sold) || 0;
+  if (qs > 0) return qs;
+  if (item.status === "sold") return Number(item.quantity) || 1;
+  return 0;
+}
+
 function ListedToggles({ item, onToggle }) {
   const platforms = [
     { field: "ebay_listed", label: "eBay", priceField: "ebay_listed_price" },
@@ -452,7 +463,7 @@ function timeAgo(iso) {
   return fmtDate(iso);
 }
 
-function StockListRow({ item: e, onOpen }) {
+function StockListRow({ item: e, onOpen, onDelete }) {
   const isListed = e.ebay_listed || e.vinted_listed || e.depop_listed;
   const thumb = e.photos?.[0] || e.thumbnail;
   const pipeline = getPipelineInfo(e);
@@ -478,11 +489,13 @@ function StockListRow({ item: e, onOpen }) {
   const isAlertStatus = e.status === "processing" || e.status === "needs_size" || e.status === "error";
   const rightLabel = !isAlertStatus && categoryStyle ? categoryStyle.label : null;
 
-  return (
-    <button
-      onClick={() => onOpen(e)}
-      className={`w-full flex items-center gap-3 text-left rounded-sm border p-2.5 transition active:scale-[0.99] ${cardCls}`}
-    >
+  // A fully sold-and-posted item has nothing left to action - no photos, no
+  // editable listing, nothing to confirm - so it doesn't open a detail screen
+  // at all. Its sale record shows directly in the row instead.
+  const isFullyDone = e.status === "sold" && !!e.posted_at;
+
+  const content = (
+    <>
       <div className="w-20 h-20 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0 relative">
         {thumb && <img src={thumb} alt="" className="w-full h-full object-cover" />}
         {soldInfo?.stage === "posted" && (
@@ -497,33 +510,46 @@ function StockListRow({ item: e, onOpen }) {
       <div className="flex-1 min-w-0">
         <div className="font-bold text-sm truncate text-[#2B2620]">{e.title}</div>
         <div className="text-xs text-[#3A3428] font-semibold mt-0.5">Added {timeAgo(e.created_at)}</div>
-        <div className="flex items-center gap-2 flex-wrap mt-1.5">
-          {isAlertStatus && <StatusBadge item={e} />}
-          {(e.quantity || 1) > 1 && (
-            <span className="inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#2B2620]/10 text-[#2B2620] font-bold">
-              {e.status === "sold" ? `×${e.quantity}` : `${(e.quantity || 1) - (e.quantity_sold || 0)} of ${e.quantity} left`}
+
+        {isFullyDone ? (
+          <div className="flex items-center gap-3 flex-wrap mt-1.5 font-mono text-xs text-[#2B2620] font-semibold">
+            <span>Sold {(e.quantity || 1) > 1 ? `£${e.sale_price} ea` : `£${e.sale_price ?? "—"}`}</span>
+            {e.cost_price != null && <span>Paid £{e.cost_price}</span>}
+            {e.sale_price != null && e.cost_price != null && (
+              <span>Profit £{((e.sale_price - e.cost_price) * effectiveQuantitySold(e)).toFixed(2)}</span>
+            )}
+            {e.posted_at && <span>Posted {fmtDate(e.posted_at)}</span>}
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 flex-wrap mt-1.5">
+            {isAlertStatus && <StatusBadge item={e} />}
+            {(e.quantity || 1) > 1 && (
+              <span className="inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#2B2620]/10 text-[#2B2620] font-bold">
+                {e.status === "sold" ? `×${e.quantity}` : `${(e.quantity || 1) - (e.quantity_sold || 0)} of ${e.quantity} left`}
+              </span>
+            )}
+            {e.status === "sold" && e.sale_price != null && (
+              <span className="text-[#2B2620] font-mono font-bold text-sm">£{e.sale_price}</span>
+            )}
+            <span className="text-xs font-mono text-[#2B2620] font-semibold">
+              #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
             </span>
-          )}
-          {e.status === "sold" && e.sale_price != null && (
-            <span className="text-[#2B2620] font-mono font-bold text-sm">£{e.sale_price}</span>
-          )}
-          <span className="text-xs font-mono text-[#2B2620] font-semibold">
-            #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
-          </span>
-          {isListed && (
-            <div className="flex gap-0.5">
-              {e.ebay_listed && (
-                <span className="w-4 h-4 rounded-sm bg-[#3B6E91] text-white text-[8px] font-bold flex items-center justify-center" title="eBay">EB</span>
-              )}
-              {e.vinted_listed && (
-                <span className="w-4 h-4 rounded-sm bg-[#7A5980] text-white text-[8px] font-bold flex items-center justify-center" title="Vinted">VI</span>
-              )}
-              {e.depop_listed && (
-                <span className="w-4 h-4 rounded-sm bg-[#6B6250] text-white text-[8px] font-bold flex items-center justify-center" title="Depop">DE</span>
-              )}
-            </div>
-          )}
-        </div>
+            {isListed && (
+              <div className="flex gap-0.5">
+                {e.ebay_listed && (
+                  <span className="w-4 h-4 rounded-sm bg-[#3B6E91] text-white text-[8px] font-bold flex items-center justify-center" title="eBay">EB</span>
+                )}
+                {e.vinted_listed && (
+                  <span className="w-4 h-4 rounded-sm bg-[#7A5980] text-white text-[8px] font-bold flex items-center justify-center" title="Vinted">VI</span>
+                )}
+                {e.depop_listed && (
+                  <span className="w-4 h-4 rounded-sm bg-[#6B6250] text-white text-[8px] font-bold flex items-center justify-center" title="Depop">DE</span>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {soldInfo?.stage === "ready_for_posting" && (
           <span className={`text-xs font-bold ${soldInfo.flag === "red" ? "text-[#A63A2E]" : "text-[#5A3C0C]"}`}>
             Needs posting{soldInfo.days > 0 ? ` · ${soldInfo.days}d` : ""}
@@ -534,7 +560,35 @@ function StockListRow({ item: e, onOpen }) {
       {rightLabel && (
         <span className="text-sm font-bold text-[#2B2620] text-right shrink-0 max-w-[7rem]">{rightLabel}</span>
       )}
+    </>
+  );
 
+  if (isFullyDone) {
+    return (
+      <div className={`w-full flex items-center gap-3 rounded-sm border p-2.5 ${cardCls}`}>
+        {content}
+        {onDelete && (
+          <button
+            onClick={(ev) => {
+              ev.stopPropagation();
+              if (window.confirm(`Delete "${e.title}" permanently? This can't be undone.`)) onDelete(e.id);
+            }}
+            className="shrink-0 text-[#2B2620]/50 hover:text-[#A63A2E] p-1"
+            title="Delete"
+          >
+            <Trash2 size={15} />
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <button
+      onClick={() => onOpen(e)}
+      className={`w-full flex items-center gap-3 text-left rounded-sm border p-2.5 transition active:scale-[0.99] ${cardCls}`}
+    >
+      {content}
       <span className="text-[#2B2620] text-lg shrink-0">›</span>
     </button>
   );
@@ -1163,10 +1217,18 @@ export default function Home() {
 
   // Once an item is posted, its photos have done their job - clearing them
   // out of Storage (and the DB row) frees up real space, since photos are by
-  // far the biggest thing in this app. Everything needed to look back on the
-  // sale later (price, cost, dates, title, category, size) is left untouched.
+  // far the biggest thing in this app. A tiny (~120px) archive thumbnail is
+  // kept as a permanent visual record - deliberately small and re-compressed,
+  // so there's no full-size original left to recover. Everything else needed
+  // to look back on the sale (price, cost, dates, title, category, size) stays.
   const confirmPosted = async (item) => {
     const now = new Date().toISOString();
+    let archiveThumbnail = null;
+    try {
+      if (item.thumbnail) archiveThumbnail = await resizeDataUrl(item.thumbnail, 120, 0.5);
+    } catch (err) {
+      console.error("Failed to build archive thumbnail for", item.id, err);
+    }
     try {
       const { data: files } = await supabase.storage.from(PHOTO_BUCKET).list(item.id);
       if (files && files.length) {
@@ -1178,9 +1240,59 @@ export default function Home() {
       // Don't block marking the item posted just because photo cleanup failed -
       // worst case a few stray files linger in Storage, not a lost sale record.
     }
-    await supabase.from("items").update({ posted_at: now, photos: [], thumbnail: null }).eq("id", item.id);
-    setSelectedItem({ ...item, posted_at: now, photos: [], thumbnail: null });
+    await supabase.from("items").update({ posted_at: now, photos: [], thumbnail: archiveThumbnail }).eq("id", item.id);
+    setSelectedItem({ ...item, posted_at: now, photos: [], thumbnail: archiveThumbnail });
     fetchItems();
+  };
+
+  const [cleaningUp, setCleaningUp] = useState(false);
+
+  // One-time maintenance pass for items marked sold+posted before the archive
+  // thumbnail existed - they still hold full-size photos in Storage. Shrinks
+  // each to a tiny thumbnail and clears the rest, same as confirmPosted does now.
+  const cleanupOldSoldPhotos = async () => {
+    if (!window.confirm("This deletes stored photos for every sold, posted item that still has them, keeping only a small thumbnail. This can't be undone. Continue?")) {
+      return;
+    }
+    setCleaningUp(true);
+    let cleaned = 0;
+    try {
+      const { data, error } = await supabase
+        .from("items")
+        .select("id, photos, thumbnail")
+        .eq("status", "sold")
+        .not("posted_at", "is", null);
+      if (error) throw error;
+      const targets = (data || []).filter((i) => Array.isArray(i.photos) && i.photos.length > 0);
+      for (const item of targets) {
+        let archiveThumbnail = null;
+        try {
+          const source = item.thumbnail || item.photos[0];
+          const dataUrl = await urlToDataUrl(source);
+          archiveThumbnail = await resizeDataUrl(dataUrl, 120, 0.5);
+        } catch (err) {
+          console.error("Failed to build archive thumbnail for", item.id, err);
+        }
+        try {
+          const { data: files } = await supabase.storage.from(PHOTO_BUCKET).list(item.id);
+          if (files && files.length) {
+            const paths = files.map((f) => `${item.id}/${f.name}`);
+            await supabase.storage.from(PHOTO_BUCKET).remove(paths);
+          }
+        } catch (err) {
+          console.error("Storage cleanup failed for", item.id, err);
+        }
+        await supabase.from("items").update({ photos: [], thumbnail: archiveThumbnail }).eq("id", item.id);
+        cleaned++;
+      }
+      alert(`Cleaned up ${cleaned} item(s).`);
+    } catch (err) {
+      console.error("Cleanup failed:", err);
+      alert("Cleanup failed: " + (err.message || err));
+    } finally {
+      setCleaningUp(false);
+      fetchItems();
+    }
   };
 
   const removeItem = async (id) => {
@@ -1245,7 +1357,7 @@ export default function Home() {
               <SettingsIcon size={16} />
             </button>
             {settingsOpen && (
-              <div className="absolute right-0 mt-1 w-56 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm shadow-lg z-20 p-1">
+              <div className="absolute right-0 mt-1 w-64 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm shadow-lg z-20 p-1">
                 <button
                   onClick={() => {
                     setSettingsOpen(false);
@@ -1256,6 +1368,17 @@ export default function Home() {
                 >
                   {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
                   {exporting ? "Preparing backup…" : "Export full backup"}
+                </button>
+                <button
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    cleanupOldSoldPhotos();
+                  }}
+                  disabled={cleaningUp}
+                  className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#2B2620] hover:bg-[#DCD4BC] flex items-center gap-2 disabled:opacity-50"
+                >
+                  {cleaningUp ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                  {cleaningUp ? "Cleaning up…" : "Clean up old sold photos"}
                 </button>
               </div>
             )}
@@ -1268,10 +1391,10 @@ export default function Home() {
           {(() => {
             const soldItems = items.filter((e) => e.status === "sold");
             const activeItems = items.filter((e) => e.status !== "sold");
-            // Revenue comes from units actually sold (quantity_sold), which
-            // can be >0 on a "ready" item too if only some of its quantity
-            // has sold so far - not just fully-sold items.
-            const revenue = items.reduce((s, e) => s + (Number(e.sale_price) || 0) * (Number(e.quantity_sold) || 0), 0);
+            // Revenue comes from units actually sold (effectiveQuantitySold),
+            // which can be >0 on a "ready" item too if only some of its
+            // quantity has sold so far - not just fully-sold items.
+            const revenue = items.reduce((s, e) => s + (Number(e.sale_price) || 0) * effectiveQuantitySold(e), 0);
             // Cost is money actually spent - per-unit cost × total quantity
             // ever captured for that item, summed across every item.
             const cost = items.reduce((s, e) => s + (Number(e.cost_price) || 0) * (Number(e.quantity) || 1), 0);
@@ -1282,20 +1405,21 @@ export default function Home() {
             // (falling back to created_at for old sold items from before
             // sold_at existed). Note: if an item's quantity sold across more
             // than one month (a partial sale, then the rest later), all its
-            // quantity_sold gets attributed to the most recent sale's month -
+            // quantity gets attributed to the most recent sale's month -
             // a simplification since individual sale events aren't logged.
             const monthGroups = {};
             items
-              .filter((e) => (e.quantity_sold || 0) > 0)
+              .filter((e) => effectiveQuantitySold(e) > 0)
               .forEach((e) => {
                 const dateStr = e.sold_at || e.created_at;
                 if (!dateStr) return;
                 const d = new Date(dateStr);
                 const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
                 if (!monthGroups[key]) monthGroups[key] = { revenue: 0, cost: 0, units: 0 };
-                monthGroups[key].revenue += (Number(e.sale_price) || 0) * (Number(e.quantity_sold) || 0);
-                monthGroups[key].cost += (Number(e.cost_price) || 0) * (Number(e.quantity_sold) || 0);
-                monthGroups[key].units += Number(e.quantity_sold) || 0;
+                const qty = effectiveQuantitySold(e);
+                monthGroups[key].revenue += (Number(e.sale_price) || 0) * qty;
+                monthGroups[key].cost += (Number(e.cost_price) || 0) * qty;
+                monthGroups[key].units += qty;
               });
             const monthTrends = Object.entries(monthGroups)
               .sort((a, b) => (a[0] < b[0] ? 1 : -1))
@@ -1451,7 +1575,7 @@ export default function Home() {
                     <p className="text-xs font-semibold text-[#8A7F63] uppercase tracking-wide mb-2">Recently captured</p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {recent.map((e) => (
-                        <StockListRow key={e.id} item={e} onOpen={openItem} />
+                        <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />
                       ))}
                     </div>
                   </div>
@@ -1514,7 +1638,7 @@ export default function Home() {
                   {filtered.length === 0 ? (
                     <p className="text-sm text-[#8A7F63] py-8 text-center">Nothing here right now.</p>
                   ) : (
-                    filtered.map((e) => <StockListRow key={e.id} item={e} onOpen={openItem} />)
+                    filtered.map((e) => <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />)
                   )}
                 </div>
               </>
@@ -1827,7 +1951,7 @@ export default function Home() {
                 ) : (
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
                     {filteredItems.map((e) => (
-                      <StockListRow key={e.id} item={e} onOpen={openItem} />
+                      <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />
                     ))}
                   </div>
                 )}
@@ -1942,7 +2066,7 @@ export default function Home() {
                     {(selectedItem.quantity || 1) > 1 && (
                       <div>
                         <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Units sold</span>
-                        <span>{selectedItem.quantity_sold || 0} of {selectedItem.quantity}</span>
+                        <span>{effectiveQuantitySold(selectedItem)} of {selectedItem.quantity}</span>
                       </div>
                     )}
                     {selectedItem.sale_price != null && selectedItem.cost_price != null && (
@@ -1951,7 +2075,7 @@ export default function Home() {
                           {(selectedItem.quantity || 1) > 1 ? "Total profit" : "Profit"}
                         </span>
                         <span className="text-[#3F5E42] font-bold">
-                          £{((selectedItem.sale_price - selectedItem.cost_price) * (selectedItem.quantity_sold || 1)).toFixed(2)}
+                          £{((selectedItem.sale_price - selectedItem.cost_price) * effectiveQuantitySold(selectedItem)).toFixed(2)}
                         </span>
                       </div>
                     )}
