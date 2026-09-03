@@ -67,6 +67,7 @@ function compressImage(file, maxWidth, quality) {
 function resizeDataUrl(dataUrl, maxWidth, quality) {
   return new Promise((resolve, reject) => {
     const img = new Image();
+    img.crossOrigin = "anonymous"; // needed to read pixel data back off a Storage URL, no-op for data: URLs
     img.onload = () => {
       let w = img.width, h = img.height;
       if (w > maxWidth) {
@@ -887,13 +888,17 @@ export default function Home() {
     fetchItems();
   }, [unlocked, fetchItems]);
 
-  // poll for updates while on the stock tab, so items processed on the other device show up
+  // Poll for updates while on the stock tab - fast (4s) while something's
+  // actually processing so completion shows up quickly, otherwise slow (30s)
+  // just to catch a new item captured on the other device. Constant 4s
+  // polling regardless of state was the single biggest source of egress,
+  // since every poll re-reads every item's thumbnail.
   useEffect(() => {
-    if (view === "stock" && unlocked) {
-      pollRef.current = setInterval(fetchItems, 4000);
-      return () => clearInterval(pollRef.current);
-    }
-  }, [view, unlocked, fetchItems]);
+    if (view !== "stock" || !unlocked) return;
+    const hasProcessing = items.some((e) => e.status === "processing");
+    pollRef.current = setInterval(fetchItems, hasProcessing ? 4000 : 30000);
+    return () => clearInterval(pollRef.current);
+  }, [view, unlocked, fetchItems, items]);
 
   const handleAddPhoto = async (e) => {
     const file = e.target.files?.[0];
@@ -978,7 +983,11 @@ export default function Home() {
     if (currentPhotos.length === 0) return;
     try {
       const id = crypto.randomUUID();
-      const thumbnail = await resizeDataUrl(currentPhotos[0], 600, 0.65).catch(() => currentPhotos[0]);
+      const thumbDataUrl = await resizeDataUrl(currentPhotos[0], 600, 0.65).catch(() => currentPhotos[0]);
+      // Thumbnail goes to Storage too, same as full photos - a base64 blob
+      // sitting directly in the database row gets re-read on every fetchItems
+      // call (PostgREST egress), which is what actually caused the spike.
+      const thumbnail = await uploadPhotoToStorage(thumbDataUrl, `${id}/thumb.jpg`).catch(() => thumbDataUrl);
 
       // Upload full-size photos to Storage instead of embedding them in the
       // database row - this is what actually fixes the egress problem, since
@@ -1233,9 +1242,9 @@ export default function Home() {
   // to look back on the sale (price, cost, dates, title, category, size) stays.
   const confirmPosted = async (item) => {
     const now = new Date().toISOString();
-    let archiveThumbnail = null;
+    let shrunkDataUrl = null;
     try {
-      if (item.thumbnail) archiveThumbnail = await resizeDataUrl(item.thumbnail, 120, 0.5);
+      if (item.thumbnail) shrunkDataUrl = await resizeDataUrl(item.thumbnail, 120, 0.5);
     } catch (err) {
       console.error("Failed to build archive thumbnail for", item.id, err);
     }
@@ -1250,57 +1259,53 @@ export default function Home() {
       // Don't block marking the item posted just because photo cleanup failed -
       // worst case a few stray files linger in Storage, not a lost sale record.
     }
+    // Upload the shrunk thumbnail fresh, after the cleanup above, so it
+    // doesn't get swept up in its own deletion - kept in Storage (not the DB
+    // row) so it never adds to PostgREST egress on every fetch.
+    let archiveThumbnail = null;
+    if (shrunkDataUrl) {
+      try {
+        archiveThumbnail = await uploadPhotoToStorage(shrunkDataUrl, `${item.id}/archive-thumb.jpg`);
+      } catch (err) {
+        console.error("Failed to upload archive thumbnail for", item.id, err);
+      }
+    }
     await supabase.from("items").update({ posted_at: now, photos: [], thumbnail: archiveThumbnail }).eq("id", item.id);
     setSelectedItem({ ...item, posted_at: now, photos: [], thumbnail: archiveThumbnail });
     fetchItems();
   };
 
-  const [cleaningUp, setCleaningUp] = useState(false);
+  const [migratingThumbnails, setMigratingThumbnails] = useState(false);
 
-  // One-time maintenance pass for items marked sold+posted before the archive
-  // thumbnail existed - they still hold full-size photos in Storage. Shrinks
-  // each to a tiny thumbnail and clears the rest, same as confirmPosted does now.
-  const cleanupOldSoldPhotos = async () => {
-    if (!window.confirm("This deletes stored photos for every sold, posted item that still has them, keeping only a small thumbnail. This can't be undone. Continue?")) {
+  // One-time migration for items whose thumbnail is still a base64 blob sitting
+  // directly in the database row (from before thumbnails moved to Storage) -
+  // that's what was getting re-read on every single fetchItems call, which is
+  // what actually caused the egress spike. Nothing gets deleted, just moved.
+  const migrateThumbnailsToStorage = async () => {
+    if (!window.confirm("This moves any thumbnail still stored directly in the database out to Storage instead, so it stops being re-read on every page load. Nothing is deleted. Continue?")) {
       return;
     }
-    setCleaningUp(true);
-    let cleaned = 0;
+    setMigratingThumbnails(true);
+    let migrated = 0;
     try {
-      const { data, error } = await supabase
-        .from("items")
-        .select("id, photos, thumbnail")
-        .eq("status", "sold")
-        .not("posted_at", "is", null);
+      const { data, error } = await supabase.from("items").select("id, thumbnail");
       if (error) throw error;
-      const targets = (data || []).filter((i) => Array.isArray(i.photos) && i.photos.length > 0);
+      const targets = (data || []).filter((i) => typeof i.thumbnail === "string" && i.thumbnail.startsWith("data:"));
       for (const item of targets) {
-        let archiveThumbnail = null;
         try {
-          const source = item.thumbnail || item.photos[0];
-          const dataUrl = await urlToDataUrl(source);
-          archiveThumbnail = await resizeDataUrl(dataUrl, 120, 0.5);
+          const url = await uploadPhotoToStorage(item.thumbnail, `${item.id}/thumb.jpg`);
+          await supabase.from("items").update({ thumbnail: url }).eq("id", item.id);
+          migrated++;
         } catch (err) {
-          console.error("Failed to build archive thumbnail for", item.id, err);
+          console.error("Failed to migrate thumbnail for", item.id, err);
         }
-        try {
-          const { data: files } = await supabase.storage.from(PHOTO_BUCKET).list(item.id);
-          if (files && files.length) {
-            const paths = files.map((f) => `${item.id}/${f.name}`);
-            await supabase.storage.from(PHOTO_BUCKET).remove(paths);
-          }
-        } catch (err) {
-          console.error("Storage cleanup failed for", item.id, err);
-        }
-        await supabase.from("items").update({ photos: [], thumbnail: archiveThumbnail }).eq("id", item.id);
-        cleaned++;
       }
-      alert(`Cleaned up ${cleaned} item(s).`);
+      alert(`Migrated ${migrated} thumbnail(s) to Storage.`);
     } catch (err) {
-      console.error("Cleanup failed:", err);
-      alert("Cleanup failed: " + (err.message || err));
+      console.error("Migration failed:", err);
+      alert("Migration failed: " + (err.message || err));
     } finally {
-      setCleaningUp(false);
+      setMigratingThumbnails(false);
       fetchItems();
     }
   };
@@ -1402,13 +1407,13 @@ export default function Home() {
                 <button
                   onClick={() => {
                     setSettingsOpen(false);
-                    cleanupOldSoldPhotos();
+                    migrateThumbnailsToStorage();
                   }}
-                  disabled={cleaningUp}
+                  disabled={migratingThumbnails}
                   className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#2B2620] hover:bg-[#DCD4BC] flex items-center gap-2 disabled:opacity-50"
                 >
-                  {cleaningUp ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
-                  {cleaningUp ? "Cleaning up…" : "Clean up old sold photos"}
+                  {migratingThumbnails ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                  {migratingThumbnails ? "Migrating…" : "Migrate old thumbnails to Storage"}
                 </button>
               </div>
             )}
