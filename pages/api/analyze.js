@@ -23,11 +23,16 @@ function buildFullPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings) 
     : "";
 
   const pricingStep = ebayListingsBlock
-    ? `Step 2: Below are REAL current eBay UK active listings for this item, retrieved directly from eBay's own API (not a web search) - these are genuine, live comparable items:
+    ? `Step 2: Below are REAL current eBay UK active listings for this item, retrieved directly from eBay's own API (not a web search) - genuine, live listings, each tagged with an id like [L1]:
 
 ${ebayListingsBlock}
 
-Use these as your primary basis for estimated_price_low/estimated_price_high. These are active asking prices, not confirmed sold prices, so still price toward the lower third of what you see rather than the middle or top - sellers list high and negotiate down. If the results above don't look like genuine matches for this item, say so in notes and fall back to your own judgement with lower confidence.${totalNote}
+For EVERY listing above, judge how well it actually matches THIS exact item (from the photos), using this hierarchy in order of importance: brand -> exact product/model -> garment type -> gender -> size -> condition -> colour/style. Classify each into exactly one tier:
+- "strong": same brand, same or equivalent product line/model, same garment type, matching gender, a compatible size, and broadly comparable condition - a genuine like-for-like comparable you'd expect to sell for a similar price to this exact item
+- "weak": same general category but meaningfully different in one of the above (different brand, notably different model, wrong size bracket, or a much different condition) - informative but not a tight match
+- "reject": wrong brand, wrong garment type, wrong gender, a bundle/lot listing, an accessory rather than the item itself, or otherwise not a real comparable
+
+Be strict, not generous - reserve "strong" for genuine matches. Report your tier for every single listing id shown above in ebay_comparable_scores, even the ones you reject. Still fill in estimated_price_low/estimated_price_high with your own best-judgement price range as a fallback, in case too few strong matches turn up.${totalNote}
 
 You also have exactly ONE web search available - use it specifically to check Vinted UK for what this item goes for there, since Vinted has no API. Also use whatever you see (in the eBay data above and your Vinted search) to judge demand: many results / recent activity = high demand, few or stale results = low demand.`
     : `Step 2: You have exactly ONE web search available - use it wisely. Search eBay UK and/or Vinted for comparable items (same or similar brand/model/condition) to see what they're actually selling for right now, on BOTH platforms if your search results cover both. Prioritize sold/completed listings over active asking prices — active listings on both platforms are consistently priced above what items actually sell for, since sellers list high and negotiate down or wait for offers. If your search only turns up active asking prices, treat those as a ceiling, not a target: price toward the lower third of that range rather than the middle or top. Do not guess any price from memory — base it on what you find in search, and err conservative rather than optimistic. Also note roughly how much genuine buyer interest/turnover you saw for this kind of item (many recent sold listings = high demand; mostly old unsold active listings = low demand) - this feeds the "demand" field below.`;
@@ -48,6 +53,7 @@ Step 3: Respond with ONLY a JSON object as your final message, no markdown fence
   "brand": "brand name if visible, else empty string${cf.brand ? " (seller has confirmed: " + cf.brand + " - use that)" : ""}",
   "estimated_price_low": number (GBP, no symbol),
   "estimated_price_high": number (GBP, no symbol),
+  "ebay_comparable_scores": [{"id": "the [Lx] id exactly as shown above", "tier": "strong, weak, or reject"}${ebayListingsBlock ? " - one entry per eBay listing id shown above, required" : " - omit this field entirely, no eBay listings were shown this time"}],
   "vinted_price_low": number (GBP, no symbol - what similar items actually go for specifically on Vinted),
   "vinted_price_high": number (GBP, no symbol),
   "demand": "high, medium, or low",
@@ -75,6 +81,60 @@ function extractJson(text) {
     throw new Error(`No JSON found in AI response. Got: "${text.slice(0, 200) || "(empty response)"}"`);
   }
   return JSON.parse(text.slice(start, end + 1));
+}
+
+// ---------- pricing math (deterministic, not left to the model) ----------
+
+function percentile(sortedNums, p) {
+  if (sortedNums.length === 0) return null;
+  if (sortedNums.length === 1) return sortedNums[0];
+  const idx = (p / 100) * (sortedNums.length - 1);
+  const lower = Math.floor(idx);
+  const upper = Math.ceil(idx);
+  if (lower === upper) return sortedNums[lower];
+  const weight = idx - lower;
+  return sortedNums[lower] * (1 - weight) + sortedNums[upper] * weight;
+}
+
+function roundToNiceEnding(value) {
+  if (value == null) return null;
+  return Math.round(value * 2) / 2; // nearest 50p
+}
+
+// Builds the actual price recommendation from only the "strong" comparables
+// the model identified - median as the headline number, a range from the
+// spread of strong matches (min/max for a tiny sample, 25th-75th percentile
+// once there's enough to make that meaningful), and a confidence tied
+// directly to how many strong matches there actually were.
+function computeComparablePricing(ebayResults, comparableScores) {
+  if (!Array.isArray(ebayResults) || ebayResults.length === 0) return null;
+  if (!Array.isArray(comparableScores) || comparableScores.length === 0) return null;
+
+  const priceById = new Map(
+    ebayResults.filter((r) => typeof r.priceValue === "number" && !isNaN(r.priceValue)).map((r) => [r.id, r.priceValue])
+  );
+  const strongPrices = comparableScores
+    .filter((s) => s && s.tier === "strong")
+    .map((s) => priceById.get(s.id))
+    .filter((p) => typeof p === "number" && !isNaN(p))
+    .sort((a, b) => a - b);
+
+  if (strongPrices.length === 0) {
+    return { comparable_count: 0, price_confidence: "Low" };
+  }
+
+  const median = percentile(strongPrices, 50);
+  const useMinMax = strongPrices.length < 4;
+  const low = useMinMax ? strongPrices[0] : percentile(strongPrices, 25);
+  const high = useMinMax ? strongPrices[strongPrices.length - 1] : percentile(strongPrices, 75);
+
+  return {
+    price_low: Math.round(low),
+    price_high: Math.round(high),
+    recommended_price: roundToNiceEnding(median),
+    comparable_count: strongPrices.length,
+    price_confidence: strongPrices.length >= 6 ? "High" : strongPrices.length >= 3 ? "Medium" : "Low",
+  };
 }
 
 // ---------- eBay Browse API ----------
@@ -114,7 +174,7 @@ async function getEbayToken() {
 }
 
 async function searchEbay(query, token) {
-  const url = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodeURIComponent(query)}&limit=8`;
+  const url = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodeURIComponent(query)}&limit=25`;
   const res = await fetch(url, {
     headers: {
       Authorization: `Bearer ${token}`,
@@ -126,8 +186,10 @@ async function searchEbay(query, token) {
     return { results: [], total: null };
   }
   const data = await res.json();
-  const results = (data.itemSummaries || []).map((item) => ({
+  const results = (data.itemSummaries || []).map((item, i) => ({
+    id: `L${i + 1}`,
     title: item.title,
+    priceValue: item.price ? Number(item.price.value) : null,
     price: item.price ? `£${item.price.value}` : "?",
     condition: item.condition || "unknown",
   }));
@@ -137,14 +199,14 @@ async function searchEbay(query, token) {
 async function getEbayMarketData(query) {
   try {
     const token = await getEbayToken();
-    if (!token) return { block: null, total: null };
+    if (!token) return { block: null, total: null, results: [] };
     const { results, total } = await searchEbay(query, token);
-    if (results.length === 0) return { block: null, total };
-    const block = results.map((r) => `- "${r.title}" - ${r.price} (${r.condition})`).join("\n");
-    return { block, total };
+    if (results.length === 0) return { block: null, total, results: [] };
+    const block = results.map((r) => `- [${r.id}] "${r.title}" - ${r.price} (${r.condition})`).join("\n");
+    return { block, total, results };
   } catch (err) {
     console.error("eBay Browse API lookup failed:", err);
-    return { block: null, total: null };
+    return { block: null, total: null, results: [] };
   }
 }
 
@@ -182,10 +244,12 @@ export default async function handler(req, res) {
 
     let ebayListingsBlock = null;
     let ebayTotalListings = null;
+    let ebayResults = [];
     if (!isQuick && ebaySearchQuery) {
       const marketData = await getEbayMarketData(ebaySearchQuery);
       ebayListingsBlock = marketData.block;
       ebayTotalListings = marketData.total;
+      ebayResults = marketData.results || [];
     }
 
     const promptText = isQuick ? QUICK_PROMPT : buildFullPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings);
@@ -244,6 +308,27 @@ export default async function handler(req, res) {
     if (!isQuick) {
       result._usedRealEbayData = !!ebayListingsBlock;
       result._ebayTotalListings = ebayTotalListings;
+
+      const pricing = computeComparablePricing(ebayResults, result.ebay_comparable_scores);
+      if (pricing) {
+        result.comparable_count = pricing.comparable_count;
+        result.price_confidence = pricing.price_confidence;
+        if (pricing.comparable_count > 0) {
+          // Strong comparables found - these override the model's own
+          // estimate, which was only ever a fallback for this case.
+          result.estimated_price_low = pricing.price_low;
+          result.estimated_price_high = pricing.price_high;
+          result.recommended_price = pricing.recommended_price;
+          if (pricing.comparable_count < 3) {
+            result.notes = `${result.notes ? result.notes + " " : ""}Only ${pricing.comparable_count} strong eBay comparable(s) found - price is a rough steer, worth checking manually.`;
+          }
+        } else {
+          result.notes = `${result.notes ? result.notes + " " : ""}No strong eBay comparables found among the listings pulled - price falls back to the AI's own general estimate.`;
+        }
+      }
+      // ebay_comparable_scores was only needed for the price math above -
+      // no reason to store the raw per-listing tiers on the item itself.
+      delete result.ebay_comparable_scores;
     }
     return res.status(200).json(result);
   } catch (err) {
