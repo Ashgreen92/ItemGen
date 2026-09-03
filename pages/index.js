@@ -491,6 +491,11 @@ function StockListRow({ item: e, onOpen }) {
         <div className="text-xs text-[#8A7F63] mt-0.5">Added {timeAgo(e.created_at)}</div>
         <div className="flex items-center gap-2 flex-wrap mt-1.5">
           <StatusBadge item={e} />
+          {(e.quantity || 1) > 1 && (
+            <span className="inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#8A7F63]/15 text-[#6B6250]">
+              {e.status === "sold" ? `×${e.quantity}` : `${(e.quantity || 1) - (e.quantity_sold || 0)} of ${e.quantity} left`}
+            </span>
+          )}
           {e.status === "sold" && e.sale_price != null && (
             <span className="text-[#3F5E42] font-mono font-semibold text-sm">£{e.sale_price}</span>
           )}
@@ -759,6 +764,7 @@ export default function Home() {
   const [enhancedFlags, setEnhancedFlags] = useState([]);
   const [currentBatch, setCurrentBatch] = useState("");
   const [currentCostPrice, setCurrentCostPrice] = useState("");
+  const [currentQuantity, setCurrentQuantity] = useState(1);
   const [batchFilter, setBatchFilter] = useState("all");
   const [stockSearch, setStockSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -790,7 +796,7 @@ export default function Home() {
 
   const fetchItems = useCallback(async () => {
     const leanColumns =
-      "id, title, thumbnail, status, sale_price, cost_price, sold_at, created_at, category, size, batch, ebay_listed, vinted_listed, depop_listed, ebay_listed_at, vinted_listed_at, ebay_listed_price, vinted_listed_price, vinted_reduced_at, relisted_at, posted_at";
+      "id, title, thumbnail, status, sale_price, cost_price, sold_at, quantity, quantity_sold, created_at, category, size, batch, ebay_listed, vinted_listed, depop_listed, ebay_listed_at, vinted_listed_at, ebay_listed_price, vinted_listed_price, vinted_reduced_at, relisted_at, posted_at";
 
     let { data, error } = await supabase.from("items").select(leanColumns).order("created_at", { ascending: false });
 
@@ -923,6 +929,8 @@ export default function Home() {
           thumbnail,
           batch: currentBatch.trim() || null,
           cost_price: currentCostPrice === "" ? null : Number(currentCostPrice),
+          quantity: currentQuantity || 1,
+          quantity_sold: 0,
         })
         .select()
         .single();
@@ -930,6 +938,7 @@ export default function Home() {
       if (error) throw error;
       setCurrentPhotos([]);
       setEnhancedFlags([]);
+      setCurrentQuantity(1);
       fetchItems();
       processItem(data.id, photoUrls);
     } catch (err) {
@@ -1031,6 +1040,7 @@ export default function Home() {
   const [soldFormFor, setSoldFormFor] = useState(null);
   const [soldPriceInput, setSoldPriceInput] = useState("");
   const [costPriceInput, setCostPriceInput] = useState("");
+  const [soldQtyInput, setSoldQtyInput] = useState("1");
 
   const [exporting, setExporting] = useState(false);
 
@@ -1060,23 +1070,43 @@ export default function Home() {
     setSoldFormFor(item);
     setSoldPriceInput(item.price_low != null ? String(item.price_low) : "");
     setCostPriceInput(item.cost_price != null ? String(item.cost_price) : "");
+    // Default to selling every remaining unit - matches "last item sold we
+    // had 2 sold" being the common case; partial sales are the exception.
+    const remaining = (item.quantity || 1) - (item.quantity_sold || 0);
+    setSoldQtyInput(String(Math.max(1, remaining)));
   };
 
   const confirmSold = async () => {
     if (!soldFormFor) return;
+    const totalQty = soldFormFor.quantity || 1;
+    const priorSold = soldFormFor.quantity_sold || 0;
+    const qtySoldNow = Math.max(1, Math.min(totalQty - priorSold, Number(soldQtyInput) || 1));
+    const quantity_sold = priorSold + qtySoldNow;
+    const remaining = totalQty - quantity_sold;
+
+    // sale_price/cost_price are stored PER UNIT, consistent with how cost is
+    // entered at capture. Selling fewer than all remaining units keeps the
+    // item "ready" - no need to re-photograph the leftover stock.
     const sale_price = soldPriceInput === "" ? null : Number(soldPriceInput);
     const cost_price = costPriceInput === "" ? null : Number(costPriceInput);
     const sold_at = new Date().toISOString();
-    await supabase.from("items").update({ status: "sold", sale_price, cost_price, sold_at }).eq("id", soldFormFor.id);
-    setSelectedItem({ ...soldFormFor, status: "sold", sale_price, cost_price, sold_at });
+    const status = remaining <= 0 ? "sold" : "ready";
+
+    const updates = { status, sale_price, cost_price, sold_at, quantity_sold };
+    await supabase.from("items").update(updates).eq("id", soldFormFor.id);
+    const updated = { ...soldFormFor, ...updates };
+    setSelectedItem(updated);
+    setEditDraft((d) => (d ? { ...d, ...updates } : d));
     setSoldFormFor(null);
     fetchItems();
   };
 
   const unmarkSold = async (item) => {
-    await supabase.from("items").update({ status: "ready" }).eq("id", item.id);
-    setSelectedItem({ ...item, status: "ready" });
-    setEditDraft((d) => (d ? { ...d, status: "ready" } : d));
+    // Full undo - resets quantity_sold back to 0, since individual sale
+    // events aren't tracked separately (only the running total is kept).
+    await supabase.from("items").update({ status: "ready", quantity_sold: 0 }).eq("id", item.id);
+    setSelectedItem({ ...item, status: "ready", quantity_sold: 0 });
+    setEditDraft((d) => (d ? { ...d, status: "ready", quantity_sold: 0 } : d));
     fetchItems();
   };
 
@@ -1167,7 +1197,7 @@ export default function Home() {
           <span className="font-serif text-xl tracking-tight">ItemGen</span>
         </div>
         <div className="flex items-center gap-2">
-          <div className="flex bg-[#F7F3E8] rounded-sm p-0.5 border border-[#C9BFA3]">
+          <div className="flex flex-wrap bg-[#F7F3E8] rounded-sm p-0.5 border border-[#C9BFA3] gap-y-0.5">
             <button
               onClick={() => setView("dashboard")}
               className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "dashboard" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
@@ -1191,6 +1221,12 @@ export default function Home() {
               className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "pipeline" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
             >
               Item Status
+            </button>
+            <button
+              onClick={() => setView("bundles")}
+              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "bundles" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
+            >
+              Bundles
             </button>
           </div>
 
@@ -1226,28 +1262,35 @@ export default function Home() {
           {(() => {
             const soldItems = items.filter((e) => e.status === "sold");
             const activeItems = items.filter((e) => e.status !== "sold");
-            const revenue = soldItems.reduce((s, e) => s + (Number(e.sale_price) || 0), 0);
-            // Cost is money actually spent, so it's summed across every item
-            // that has a price paid recorded - not just the ones sold so far.
-            const cost = items.reduce((s, e) => s + (Number(e.cost_price) || 0), 0);
+            // Revenue comes from units actually sold (quantity_sold), which
+            // can be >0 on a "ready" item too if only some of its quantity
+            // has sold so far - not just fully-sold items.
+            const revenue = items.reduce((s, e) => s + (Number(e.sale_price) || 0) * (Number(e.quantity_sold) || 0), 0);
+            // Cost is money actually spent - per-unit cost × total quantity
+            // ever captured for that item, summed across every item.
+            const cost = items.reduce((s, e) => s + (Number(e.cost_price) || 0) * (Number(e.quantity) || 1), 0);
             const needsAttention = items.filter((e) => e.status === "needs_size" || e.status === "error");
             const recent = [...items].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 6);
 
-            // Monthly trends - grouped by the month an item actually sold
+            // Monthly trends - grouped by the month an item was last sold
             // (falling back to created_at for old sold items from before
-            // sold_at existed), so you can look back at how a given month or
-            // week performed.
+            // sold_at existed). Note: if an item's quantity sold across more
+            // than one month (a partial sale, then the rest later), all its
+            // quantity_sold gets attributed to the most recent sale's month -
+            // a simplification since individual sale events aren't logged.
             const monthGroups = {};
-            soldItems.forEach((e) => {
-              const dateStr = e.sold_at || e.created_at;
-              if (!dateStr) return;
-              const d = new Date(dateStr);
-              const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-              if (!monthGroups[key]) monthGroups[key] = { revenue: 0, cost: 0, count: 0 };
-              monthGroups[key].revenue += Number(e.sale_price) || 0;
-              monthGroups[key].cost += Number(e.cost_price) || 0;
-              monthGroups[key].count += 1;
-            });
+            items
+              .filter((e) => (e.quantity_sold || 0) > 0)
+              .forEach((e) => {
+                const dateStr = e.sold_at || e.created_at;
+                if (!dateStr) return;
+                const d = new Date(dateStr);
+                const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+                if (!monthGroups[key]) monthGroups[key] = { revenue: 0, cost: 0, units: 0 };
+                monthGroups[key].revenue += (Number(e.sale_price) || 0) * (Number(e.quantity_sold) || 0);
+                monthGroups[key].cost += (Number(e.cost_price) || 0) * (Number(e.quantity_sold) || 0);
+                monthGroups[key].units += Number(e.quantity_sold) || 0;
+              });
             const monthTrends = Object.entries(monthGroups)
               .sort((a, b) => (a[0] < b[0] ? 1 : -1))
               .slice(0, 6)
@@ -1338,7 +1381,7 @@ export default function Home() {
                         <div key={m.key} className="flex items-center justify-between px-3 py-2.5">
                           <div>
                             <span className="text-sm font-medium block">{m.label}</span>
-                            <span className="text-xs text-[#8A7F63]">{m.count} item{m.count === 1 ? "" : "s"} sold</span>
+                            <span className="text-xs text-[#8A7F63]">{m.units} unit{m.units === 1 ? "" : "s"} sold</span>
                           </div>
                           <div className="flex items-center gap-4 font-mono text-sm">
                             <span className="text-[#3F5E42]">{fmtMoney(m.revenue, { signed: true })}</span>
@@ -1431,18 +1474,6 @@ export default function Home() {
             const filtered =
               pipelineFilter === "all" ? categorized : categorized.filter((e) => e._category === pipelineFilter);
 
-            // bundle suggestions: same category + size, count >= 2 - only makes
-            // sense for items not yet sold, so this stays scoped to "ready".
-            const readyItems = items.filter((e) => e.status === "ready");
-            const groups = {};
-            readyItems.forEach((e) => {
-              if (!e.category || !e.size) return;
-              const key = `${e.category.trim().toLowerCase()}|${e.size.trim().toLowerCase()}`;
-              if (!groups[key]) groups[key] = [];
-              groups[key].push(e);
-            });
-            const bundleSuggestions = Object.values(groups).filter((g) => g.length >= 2);
-
             return (
               <>
                 <p className="font-serif text-2xl mb-1">Item Status</p>
@@ -1474,34 +1505,6 @@ export default function Home() {
                   })}
                 </div>
 
-                {bundleSuggestions.length > 0 && (
-                  <div className="mb-6">
-                    <p className="text-xs font-semibold text-[#A9822E] uppercase tracking-wide mb-2">
-                      Bundle suggestions — same category &amp; size
-                    </p>
-                    <div className="flex flex-col gap-2">
-                      {bundleSuggestions.map((group, i) => (
-                        <div key={i} className="bg-[#A9822E]/8 border border-[#A9822E]/30 rounded-sm p-3">
-                          <p className="text-sm font-medium mb-2">
-                            {group.length}× {group[0].category} · {group[0].size}
-                          </p>
-                          <div className="flex flex-col gap-1.5">
-                            {group.map((e) => (
-                              <button
-                                key={e.id}
-                                onClick={() => openItem(e)}
-                                className="text-sm text-left text-[#2B2620] underline decoration-[#C9BFA3]"
-                              >
-                                {e.title}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
                 <div className="flex flex-col gap-2">
                   {filtered.length === 0 ? (
                     <p className="text-sm text-[#8A7F63] py-8 text-center">Nothing here right now.</p>
@@ -1509,6 +1512,59 @@ export default function Home() {
                     filtered.map((e) => <StockListRow key={e.id} item={e} onOpen={openItem} />)
                   )}
                 </div>
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {view === "bundles" && (
+        <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
+          {(() => {
+            // Same category + size, count >= 2 - only makes sense for items
+            // not yet sold. NOTE: this grouping logic is a known rough draft -
+            // paused for improvement, just relocated to its own tab for now.
+            const readyItems = items.filter((e) => e.status === "ready");
+            const groups = {};
+            readyItems.forEach((e) => {
+              if (!e.category || !e.size) return;
+              const key = `${e.category.trim().toLowerCase()}|${e.size.trim().toLowerCase()}`;
+              if (!groups[key]) groups[key] = [];
+              groups[key].push(e);
+            });
+            const bundleSuggestions = Object.values(groups).filter((g) => g.length >= 2);
+
+            return (
+              <>
+                <p className="font-serif text-2xl mb-1">Bundles</p>
+                <p className="text-sm text-[#8A7F63] mb-5">
+                  Items that share a category and size — worth listing together.
+                </p>
+
+                {bundleSuggestions.length === 0 ? (
+                  <p className="text-sm text-[#8A7F63] py-8 text-center">No bundle matches right now.</p>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    {bundleSuggestions.map((group, i) => (
+                      <div key={i} className="bg-[#A9822E]/8 border border-[#A9822E]/30 rounded-sm p-3">
+                        <p className="text-sm font-medium mb-2">
+                          {group.length}× {group[0].category} · {group[0].size}
+                        </p>
+                        <div className="flex flex-col gap-1.5">
+                          {group.map((e) => (
+                            <button
+                              key={e.id}
+                              onClick={() => openItem(e)}
+                              className="text-sm text-left text-[#2B2620] underline decoration-[#C9BFA3]"
+                            >
+                              {e.title}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </>
             );
           })()}
@@ -1554,6 +1610,40 @@ export default function Home() {
             {currentCostPrice && (
               <p className="text-xs text-[#8A7F63] mt-1">
                 Every item you capture will use £{currentCostPrice} until you change or clear this — handy for box price ÷ number of items.
+              </p>
+            )}
+          </div>
+
+          <div className="mb-4">
+            <label className="text-xs text-[#8A7F63] uppercase tracking-wide mb-1 block">
+              Quantity — identical items sharing these photos
+            </label>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setCurrentQuantity((q) => Math.max(1, q - 1))}
+                className="w-10 h-10 rounded-sm bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-bold text-lg flex items-center justify-center"
+              >
+                −
+              </button>
+              <input
+                type="number"
+                min={1}
+                value={currentQuantity}
+                onChange={(e) => setCurrentQuantity(Math.max(1, Number(e.target.value) || 1))}
+                className="w-20 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono text-center"
+              />
+              <button
+                type="button"
+                onClick={() => setCurrentQuantity((q) => q + 1)}
+                className="w-10 h-10 rounded-sm bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-bold text-lg flex items-center justify-center"
+              >
+                +
+              </button>
+            </div>
+            {currentQuantity > 1 && (
+              <p className="text-xs text-[#8A7F63] mt-1">
+                One stock entry for {currentQuantity} identical items — no need to photograph the same thing twice. Resets to 1 after each capture.
               </p>
             )}
           </div>
@@ -1833,17 +1923,31 @@ export default function Home() {
                   <p className="text-sm text-[#2B2620] font-medium mb-3">{selectedItem.title}</p>
                   <div className="flex flex-wrap gap-x-6 gap-y-2 font-mono text-sm">
                     <div>
-                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Sold for</span>
+                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">
+                        Sold for{(selectedItem.quantity || 1) > 1 ? " (per item)" : ""}
+                      </span>
                       <span>£{selectedItem.sale_price ?? "—"}</span>
                     </div>
                     <div>
-                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">You paid</span>
+                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">
+                        You paid{(selectedItem.quantity || 1) > 1 ? " (per item)" : ""}
+                      </span>
                       <span>£{selectedItem.cost_price ?? "—"}</span>
                     </div>
+                    {(selectedItem.quantity || 1) > 1 && (
+                      <div>
+                        <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Units sold</span>
+                        <span>{selectedItem.quantity_sold || 0} of {selectedItem.quantity}</span>
+                      </div>
+                    )}
                     {selectedItem.sale_price != null && selectedItem.cost_price != null && (
                       <div>
-                        <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Profit</span>
-                        <span className="text-[#3F5E42] font-bold">£{(selectedItem.sale_price - selectedItem.cost_price).toFixed(2)}</span>
+                        <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">
+                          {(selectedItem.quantity || 1) > 1 ? "Total profit" : "Profit"}
+                        </span>
+                        <span className="text-[#3F5E42] font-bold">
+                          £{((selectedItem.sale_price - selectedItem.cost_price) * (selectedItem.quantity_sold || 1)).toFixed(2)}
+                        </span>
                       </div>
                     )}
                     {selectedItem.sold_at && (
@@ -1887,10 +1991,30 @@ export default function Home() {
             {soldFormFor && (
               <div className="fixed inset-0 bg-[#2B2620]/60 z-30 flex items-end sm:items-center justify-center p-4">
                 <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-5 w-full max-w-sm">
-                  <p className="font-serif text-lg mb-4">Mark "{soldFormFor.title}" as sold</p>
+                  <p className="font-serif text-lg mb-1">Mark "{soldFormFor.title}" as sold</p>
+                  {(soldFormFor.quantity || 1) - (soldFormFor.quantity_sold || 0) > 1 && (
+                    <p className="text-xs text-[#8A7F63] mb-3">
+                      {(soldFormFor.quantity || 1) - (soldFormFor.quantity_sold || 0)} left in stock — prices below are per item.
+                    </p>
+                  )}
                   <div className="flex flex-col gap-3">
+                    {(soldFormFor.quantity || 1) - (soldFormFor.quantity_sold || 0) > 1 && (
+                      <div>
+                        <label className="text-xs text-[#8A7F63] mb-1 block">How many sold?</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={(soldFormFor.quantity || 1) - (soldFormFor.quantity_sold || 0)}
+                          value={soldQtyInput}
+                          onChange={(e) => setSoldQtyInput(e.target.value)}
+                          className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
+                        />
+                      </div>
+                    )}
                     <div>
-                      <label className="text-xs text-[#8A7F63] mb-1 block">Sold for (£)</label>
+                      <label className="text-xs text-[#8A7F63] mb-1 block">
+                        Sold for (£){(soldFormFor.quantity || 1) > 1 ? " — per item" : ""}
+                      </label>
                       <input
                         type="number"
                         value={soldPriceInput}
@@ -1998,6 +2122,17 @@ export default function Home() {
 
             {selectedItem.status === "ready" && editDraft && (
               <>
+                {(selectedItem.quantity || 1) > 1 && (
+                  <div className="bg-[#8A7F63]/10 border border-[#8A7F63]/30 rounded-sm p-3 mb-5 flex items-center justify-between">
+                    <span className="text-sm text-[#2B2620]">
+                      {(selectedItem.quantity || 1) - (selectedItem.quantity_sold || 0)} of {selectedItem.quantity} left in stock
+                    </span>
+                    {(selectedItem.quantity_sold || 0) > 0 && (
+                      <span className="text-xs font-mono text-[#8A7F63]">{selectedItem.quantity_sold} sold so far</span>
+                    )}
+                  </div>
+                )}
+
                 <ListingHelper item={selectedItem} />
 
                 <ListedToggles item={selectedItem} onToggle={togglePlatform} />
