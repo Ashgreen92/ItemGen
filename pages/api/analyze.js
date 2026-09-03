@@ -32,7 +32,7 @@ For EVERY listing above, judge how well it actually matches THIS exact item (fro
 - "weak": same general category but meaningfully different in one of the above (different brand, notably different model, wrong size bracket, or a much different condition) - informative but not a tight match
 - "reject": wrong brand, wrong garment type, wrong gender, a bundle/lot listing, an accessory rather than the item itself, or otherwise not a real comparable
 
-Be strict, not generous - reserve "strong" for genuine matches. Report your tier for every single listing id shown above in ebay_comparable_scores, even the ones you reject. Still fill in estimated_price_low/estimated_price_high with your own best-judgement price range as a fallback, in case too few strong matches turn up.${totalNote}
+Be strict, not generous - reserve "strong" for genuine matches. Report your tier for every single listing id shown above (even the ones you reject) as a single compact string in ebay_comparable_scores, formatted exactly like "L1:strong,L2:weak,L3:reject,L4:strong" - comma separated, no spaces, one entry per id. Still fill in estimated_price_low/estimated_price_high with your own best-judgement price range as a fallback, in case too few strong matches turn up.${totalNote}
 
 You also have exactly ONE web search available - use it specifically to check Vinted UK for what this item goes for there, since Vinted has no API. Also use whatever you see (in the eBay data above and your Vinted search) to judge demand: many results / recent activity = high demand, few or stale results = low demand.`
     : `Step 2: You have exactly ONE web search available - use it wisely. Search eBay UK and/or Vinted for comparable items (same or similar brand/model/condition) to see what they're actually selling for right now, on BOTH platforms if your search results cover both. Prioritize sold/completed listings over active asking prices — active listings on both platforms are consistently priced above what items actually sell for, since sellers list high and negotiate down or wait for offers. If your search only turns up active asking prices, treat those as a ceiling, not a target: price toward the lower third of that range rather than the middle or top. Do not guess any price from memory — base it on what you find in search, and err conservative rather than optimistic. Also note roughly how much genuine buyer interest/turnover you saw for this kind of item (many recent sold listings = high demand; mostly old unsold active listings = low demand) - this feeds the "demand" field below.`;
@@ -53,7 +53,7 @@ Step 3: Respond with ONLY a JSON object as your final message, no markdown fence
   "brand": "brand name if visible, else empty string${cf.brand ? " (seller has confirmed: " + cf.brand + " - use that)" : ""}",
   "estimated_price_low": number (GBP, no symbol),
   "estimated_price_high": number (GBP, no symbol),
-  "ebay_comparable_scores": [{"id": "the [Lx] id exactly as shown above", "tier": "strong, weak, or reject"}${ebayListingsBlock ? " - one entry per eBay listing id shown above, required" : " - omit this field entirely, no eBay listings were shown this time"}],
+  "ebay_comparable_scores": "${ebayListingsBlock ? "compact string like L1:strong,L2:weak,L3:reject - one entry per eBay listing id shown above, comma separated, no spaces, required" : "omit this field entirely, no eBay listings were shown this time"}",
   "vinted_price_low": number (GBP, no symbol - what similar items actually go for specifically on Vinted),
   "vinted_price_high": number (GBP, no symbol),
   "demand": "high, medium, or low",
@@ -106,16 +106,18 @@ function roundToNiceEnding(value) {
 // spread of strong matches (min/max for a tiny sample, 25th-75th percentile
 // once there's enough to make that meaningful), and a confidence tied
 // directly to how many strong matches there actually were.
-function computeComparablePricing(ebayResults, comparableScores) {
+function computeComparablePricing(ebayResults, comparableScoresStr) {
   if (!Array.isArray(ebayResults) || ebayResults.length === 0) return null;
-  if (!Array.isArray(comparableScores) || comparableScores.length === 0) return null;
+  if (typeof comparableScoresStr !== "string" || !comparableScoresStr.trim()) return null;
 
   const priceById = new Map(
     ebayResults.filter((r) => typeof r.priceValue === "number" && !isNaN(r.priceValue)).map((r) => [r.id, r.priceValue])
   );
-  const strongPrices = comparableScores
-    .filter((s) => s && s.tier === "strong")
-    .map((s) => priceById.get(s.id))
+  const strongPrices = comparableScoresStr
+    .split(",")
+    .map((pair) => pair.trim().split(":"))
+    .filter(([id, tier]) => id && tier && tier.trim().toLowerCase() === "strong")
+    .map(([id]) => priceById.get(id.trim()))
     .filter((p) => typeof p === "number" && !isNaN(p))
     .sort((a, b) => a - b);
 
@@ -256,7 +258,7 @@ export default async function handler(req, res) {
 
     const body = {
       model: isQuick ? "claude-haiku-4-5-20251001" : "claude-sonnet-5",
-      max_tokens: isQuick ? 300 : 2500,
+      max_tokens: isQuick ? 300 : 4000,
       messages: [
         {
           role: "user",
