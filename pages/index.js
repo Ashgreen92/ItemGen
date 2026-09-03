@@ -225,12 +225,12 @@ function BackgroundSunflower() {
 // Status. "both" (eBay + Vinted) gets its own colour rather than reusing
 // either single-platform colour, so it's never mistaken for just one of them.
 const CATEGORY_STYLES = {
-  unlisted: { label: "Unlisted", solid: "bg-[#6B6250] text-white", tint: "bg-[#6B6250]/15 border-[#6B6250]/40", text: "text-[#6B6250]", accent: "border-l-[#6B6250]" },
-  ebay: { label: "Listed on eBay", solid: "bg-[#3B6E91] text-white", tint: "bg-[#3B6E91]/15 border-[#3B6E91]/40", text: "text-[#3B6E91]", accent: "border-l-[#3B6E91]" },
-  vinted: { label: "Listed on Vinted", solid: "bg-[#7A5980] text-white", tint: "bg-[#7A5980]/15 border-[#7A5980]/40", text: "text-[#7A5980]", accent: "border-l-[#7A5980]" },
-  both: { label: "Listed on both", solid: "bg-[#B8860B] text-white", tint: "bg-[#B8860B]/15 border-[#B8860B]/40", text: "text-[#B8860B]", accent: "border-l-[#B8860B]" },
-  sold: { label: "Sold", solid: "bg-[#3F5E42] text-white", tint: "bg-[#3F5E42]/15 border-[#3F5E42]/40", text: "text-[#3F5E42]", accent: "border-l-[#3F5E42]" },
-  ready_for_posting: { label: "Ready for posting", solid: "bg-[#A63A2E] text-white", tint: "bg-[#A63A2E]/15 border-[#A63A2E]/40", text: "text-[#A63A2E]", accent: "border-l-[#A63A2E]" },
+  unlisted: { label: "Unlisted", solid: "bg-[#6B6250] text-white", tint: "bg-[#6B6250]/15 border-[#6B6250]/40", fillMedium: "bg-[#6B6250]/35 border-[#6B6250]", text: "text-[#6B6250]", accent: "border-l-[#6B6250]" },
+  ebay: { label: "Listed on eBay", solid: "bg-[#3B6E91] text-white", tint: "bg-[#3B6E91]/15 border-[#3B6E91]/40", fillMedium: "bg-[#3B6E91]/35 border-[#3B6E91]", text: "text-[#3B6E91]", accent: "border-l-[#3B6E91]" },
+  vinted: { label: "Listed on Vinted", solid: "bg-[#7A5980] text-white", tint: "bg-[#7A5980]/15 border-[#7A5980]/40", fillMedium: "bg-[#7A5980]/35 border-[#7A5980]", text: "text-[#7A5980]", accent: "border-l-[#7A5980]" },
+  both: { label: "Listed on both", solid: "bg-[#B8860B] text-[#2B2620]", tint: "bg-[#B8860B]/15 border-[#B8860B]/40", fillMedium: "bg-[#B8860B]/35 border-[#B8860B]", text: "text-[#B8860B]", accent: "border-l-[#B8860B]" },
+  sold: { label: "Sold", solid: "bg-[#3F5E42] text-white", tint: "bg-[#3F5E42]/15 border-[#3F5E42]/40", fillMedium: "bg-[#3F5E42]/35 border-[#3F5E42]", text: "text-[#3F5E42]", accent: "border-l-[#3F5E42]" },
+  ready_for_posting: { label: "Ready for posting", solid: "bg-[#A63A2E] text-white", tint: "bg-[#A63A2E]/15 border-[#A63A2E]/40", fillMedium: "bg-[#A63A2E]/35 border-[#A63A2E]", text: "text-[#A63A2E]", accent: "border-l-[#A63A2E]" },
 };
 
 // Works out which colour category an item belongs in. Active items are
@@ -388,8 +388,8 @@ const PIPELINE_STAGES = {
 
 const FLAG_STYLES = {
   none: { badge: "", card: "bg-[#F7F3E8] border-[#C9BFA3]", accent: "" },
-  orange: { badge: "bg-[#A9822E] text-white", card: "bg-[#A9822E]/15 border-[#A9822E]", accent: "border-l-[#A9822E]" },
-  red: { badge: "bg-[#A63A2E] text-white", card: "bg-[#A63A2E]/15 border-[#A63A2E]", accent: "border-l-[#A63A2E]" },
+  orange: { badge: "bg-[#A9822E] text-white", card: "bg-[#A9822E]/35 border-[#A9822E]", accent: "border-l-[#A9822E]" },
+  red: { badge: "bg-[#A63A2E] text-white", card: "bg-[#A63A2E]/35 border-[#A63A2E]", accent: "border-l-[#A63A2E]" },
 };
 
 function daysSince(iso) {
@@ -463,11 +463,20 @@ function StockListRow({ item: e, onOpen }) {
   // An overdue pipeline flag (red/orange, from the day-counter) takes visual
   // priority over the plain category colour, since it's a "do something now"
   // signal rather than just a status label - otherwise, colour by category.
-  // Always a plain, light background - only the left border carries colour,
-  // so title/price/metadata text stays high-contrast regardless of category.
-  const accentCls =
-    pipeline && pipeline.flag !== "none" ? flagStyle.accent : categoryStyle ? categoryStyle.accent : "";
-  const cardCls = accentCls ? `bg-[#F7F3E8] border-[#C9BFA3] border-l-4 ${accentCls}` : "bg-[#F7F3E8] border-[#C9BFA3]";
+  // Whole card fills with the colour (not just an edge), with text staying
+  // dark and bold on top since the wash is kept light enough (35%) to hold contrast.
+  const cardCls =
+    pipeline && pipeline.flag !== "none"
+      ? flagStyle.card
+      : categoryStyle
+      ? categoryStyle.fillMedium
+      : "bg-[#F7F3E8] border-[#C9BFA3]";
+
+  // Processing/needs_size/error are actionable alerts, not listing categories,
+  // so they keep the small solid pill (via StatusBadge). Everything else shows
+  // as plain bold text on the right - the card's own fill already carries the colour.
+  const isAlertStatus = e.status === "processing" || e.status === "needs_size" || e.status === "error";
+  const rightLabel = !isAlertStatus && categoryStyle ? categoryStyle.label : null;
 
   return (
     <button
@@ -486,24 +495,24 @@ function StockListRow({ item: e, onOpen }) {
       </div>
 
       <div className="flex-1 min-w-0">
-        <div className="font-medium text-sm truncate text-[#2B2620]">{e.title}</div>
-        <div className="text-xs text-[#6B6250] mt-0.5">Added {timeAgo(e.created_at)}</div>
+        <div className="font-bold text-sm truncate text-[#2B2620]">{e.title}</div>
+        <div className="text-xs text-[#3A3428] font-semibold mt-0.5">Added {timeAgo(e.created_at)}</div>
         <div className="flex items-center gap-2 flex-wrap mt-1.5">
-          <StatusBadge item={e} />
+          {isAlertStatus && <StatusBadge item={e} />}
           {(e.quantity || 1) > 1 && (
-            <span className="inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#6B6250]/20 text-[#4A4436] font-bold">
+            <span className="inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#2B2620]/10 text-[#2B2620] font-bold">
               {e.status === "sold" ? `×${e.quantity}` : `${(e.quantity || 1) - (e.quantity_sold || 0)} of ${e.quantity} left`}
             </span>
           )}
           {e.status === "sold" && e.sale_price != null && (
             <span className="text-[#2B2620] font-mono font-bold text-sm">£{e.sale_price}</span>
           )}
-          <span className="text-xs font-mono text-[#6B6250] font-medium">
+          <span className="text-xs font-mono text-[#2B2620] font-semibold">
             #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
           </span>
           {pipeline && pipeline.stage !== "not_listed" && (
             <span className={`inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm ${
-              pipeline.flag === "none" ? "bg-[#6B6250]/20 text-[#4A4436]" : flagStyle.badge
+              pipeline.flag === "none" ? "bg-[#2B2620]/10 text-[#2B2620]" : flagStyle.badge
             }`}>
               {PIPELINE_STAGES[pipeline.stage].label} · Day {pipeline.days}
             </span>
@@ -523,16 +532,21 @@ function StockListRow({ item: e, onOpen }) {
           )}
         </div>
         {soldInfo?.stage === "ready_for_posting" && (
-          <span className={`text-xs font-bold ${soldInfo.flag === "red" ? "text-[#A63A2E]" : "text-[#8A5A1E]"}`}>
+          <span className={`text-xs font-bold ${soldInfo.flag === "red" ? "text-[#A63A2E]" : "text-[#5A3C0C]"}`}>
             Needs posting{soldInfo.days > 0 ? ` · ${soldInfo.days}d` : ""}
           </span>
         )}
       </div>
 
-      <span className="text-[#6B6250] text-lg shrink-0">›</span>
+      {rightLabel && (
+        <span className="text-sm font-bold text-[#2B2620] text-right shrink-0 max-w-[7rem]">{rightLabel}</span>
+      )}
+
+      <span className="text-[#2B2620] text-lg shrink-0">›</span>
     </button>
   );
 }
+
 
 function ListingHelper({ item }) {
   const priceLabel =
@@ -1199,31 +1213,31 @@ export default function Home() {
           <div className="flex flex-wrap bg-[#F7F3E8] rounded-sm p-0.5 border border-[#C9BFA3] gap-y-0.5">
             <button
               onClick={() => setView("dashboard")}
-              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "dashboard" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
+              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "dashboard" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
             >
               Home
             </button>
             <button
               onClick={() => setView("capture")}
-              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "capture" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
+              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "capture" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
             >
               Upload New
             </button>
             <button
               onClick={() => setView("stock")}
-              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "stock" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
+              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "stock" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
             >
               Stock {items.length > 0 && `(${items.length})`}
             </button>
             <button
               onClick={() => setView("pipeline")}
-              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "pipeline" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
+              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "pipeline" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
             >
               Item Status
             </button>
             <button
               onClick={() => setView("bundles")}
-              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-medium transition ${view === "bundles" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
+              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "bundles" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
             >
               Bundles
             </button>
@@ -1475,15 +1489,14 @@ export default function Home() {
 
             return (
               <>
-                <p className="font-serif text-2xl mb-1">Item Status</p>
-                <p className="text-sm text-[#8A7F63] mb-5">
-                  Where each item stands — unlisted, listed, sold, or ready for posting.
-                </p>
+                <p className="font-serif text-2xl mb-5">Item Status</p>
 
                 <div className="flex flex-wrap gap-2 mb-5">
                   <button
                     onClick={() => setPipelineFilter("all")}
-                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${pipelineFilter === "all" ? "bg-[#A9822E] border-[#A9822E] text-white" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"}`}
+                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold border-2 transition bg-[#A9822E] text-[#2B2620] ${
+                      pipelineFilter === "all" ? "border-[#2B2620]" : "border-transparent"
+                    }`}
                   >
                     All ({categorized.length})
                   </button>
@@ -1494,8 +1507,8 @@ export default function Home() {
                       <button
                         key={key}
                         onClick={() => setPipelineFilter(key)}
-                        className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border ${
-                          active ? `${style.solid} border-transparent` : `${style.tint} ${style.text}`
+                        className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold border-2 transition ${style.solid} ${
+                          active ? "border-[#2B2620]" : "border-transparent"
                         }`}
                       >
                         {style.label} ({categoryCounts[key] || 0})
