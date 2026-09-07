@@ -434,6 +434,63 @@ function parseGarmentType(category) {
   return t.replace(/^[\s'-]+|[\s'-]+$/g, "").trim() || category.trim();
 }
 
+// Standard UK women's/unisex size chart - approximate, since vintage and
+// brand-to-brand sizing varies. Good enough to catch "12-14" / "M" / "12"
+// being the same, which exact string matching gets completely wrong -
+// not precise enough to trust blindly on older or off-brand stock.
+const UK_SIZE_TO_BUCKET = [
+  { max: 6, bucket: "XS" },
+  { max: 10, bucket: "S" },
+  { max: 14, bucket: "M" },
+  { max: 18, bucket: "L" },
+  { max: 22, bucket: "XL" },
+  { max: 26, bucket: "XXL" },
+];
+const LETTER_BUCKET_ALIASES = {
+  xxs: "XS", "extra extra small": "XS", xs: "XS", "extra small": "XS", "x-small": "XS",
+  s: "S", small: "S",
+  m: "M", medium: "M", "med": "M",
+  l: "L", large: "L",
+  xl: "XL", "extra large": "XL", "x-large": "XL",
+  xxl: "XXL", "extra extra large": "XXL", "2xl": "XXL",
+  xxxl: "XXXL", "3xl": "XXXL",
+};
+
+// Returns a canonical bucket (e.g. "M") when confident, or the original
+// trimmed string when not - unrecognised sizes never get force-merged with
+// anything else, they just group with identical-looking labels as before.
+// garmentType matters: trousers/jeans use waist inches, which overlap the
+// same number range as UK dress sizes but mean something completely
+// different - the dress-size chart must never apply to those.
+function normalizeSize(rawSize, garmentType) {
+  if (!rawSize) return null;
+  const s = rawSize.trim().toLowerCase();
+  const isWaistSized = garmentType && /trouser|jean|pant|legging|short|chino/i.test(garmentType);
+
+  // Kids' age-based sizing stays entirely separate from adult letter/numeric
+  // sizes - never bucket these together with the adult chart above.
+  if (/\byears?\b|\byrs?\b|\bage\b|\bmonths?\b|\bmos?\b/.test(s)) return `Kids: ${s}`;
+
+  if (LETTER_BUCKET_ALIASES[s]) return LETTER_BUCKET_ALIASES[s];
+
+  if (!isWaistSized) {
+    // A range like "12-14" or "12 to 14" - use the lower number, since ranges
+    // are typically written smaller-first.
+    const rangeMatch = s.match(/^(\d{1,2})\s*(?:-|to)\s*(\d{1,2})$/);
+    const singleMatch = s.match(/^(?:uk\s*)?(\d{1,2})$/);
+    const num = rangeMatch ? Number(rangeMatch[1]) : singleMatch ? Number(singleMatch[1]) : null;
+
+    if (num != null && num >= 4 && num <= 26) {
+      const hit = UK_SIZE_TO_BUCKET.find((b) => num <= b.max);
+      if (hit) return hit.bucket;
+    }
+  }
+
+  // Not something we're confident about (waist sizes, shoe sizes, odd
+  // formats) - return as-is so it still groups with identical labels.
+  return rawSize.trim();
+}
+
 function isStaleListing(item) {
   if (item.status !== "ready") return false;
   const firstListedAt = [item.ebay_listed_at, item.vinted_listed_at].filter(Boolean).sort()[0];
@@ -1906,34 +1963,42 @@ export default function Home() {
 
             const readyItems = items
               .filter((e) => e.status === "ready")
-              .map((e) => ({
-                ...e,
-                _gender: parseGender(e.category),
-                _garment: parseGarmentType(e.category),
-                _ageDays: daysSince(e.created_at) ?? 0,
-              }));
+              .map((e) => {
+                const garment = parseGarmentType(e.category);
+                return {
+                  ...e,
+                  _gender: parseGender(e.category),
+                  _garment: garment,
+                  _sizeBucket: normalizeSize(e.size, garment),
+                  _ageDays: daysSince(e.created_at) ?? 0,
+                };
+              });
 
             // Build filter option lists from what's actually in stock, not a
             // fixed hardcoded list - so it always matches your real categories.
             const genderOptions = [...new Set(readyItems.map((e) => e._gender).filter(Boolean))].sort();
             const garmentOptions = [...new Set(readyItems.map((e) => e._garment).filter(Boolean))].sort();
-            const sizeOptions = [...new Set(readyItems.map((e) => e.size).filter(Boolean))].sort();
+            // Size options are the normalized buckets, not raw labels - so
+            // picking "M" catches "M", "12-14", and "12" all at once.
+            const sizeOptions = [...new Set(readyItems.map((e) => e._sizeBucket).filter(Boolean))].sort();
 
             const filtered = readyItems.filter(
               (e) =>
                 (bundleFilterGender === "all" || e._gender === bundleFilterGender) &&
                 (bundleFilterGarment === "all" || e._garment === bundleFilterGarment) &&
-                (bundleFilterSize === "all" || e.size === bundleFilterSize)
+                (bundleFilterSize === "all" || e._sizeBucket === bundleFilterSize)
             );
             const filtersActive = bundleFilterGender !== "all" || bundleFilterGarment !== "all" || bundleFilterSize !== "all";
 
-            // Same category + size, count >= 2 - the automatic suggestion
-            // list. Sorted so groups containing older stock surface first,
-            // since ageing stock is exactly what most needs bundling out.
+            // Same category + normalized size bucket, count >= 2 - the
+            // automatic suggestion list. Grouping on the bucket (not the raw
+            // size text) is what catches "12-14"/"M"/"12" as the same size.
+            // Sorted so groups containing older stock surface first, since
+            // ageing stock is exactly what most needs bundling out.
             const groups = {};
             readyItems.forEach((e) => {
-              if (!e.category || !e.size) return;
-              const key = `${e.category.trim().toLowerCase()}|${e.size.trim().toLowerCase()}`;
+              if (!e.category || !e._sizeBucket) return;
+              const key = `${e.category.trim().toLowerCase()}|${e._sizeBucket.toLowerCase()}`;
               if (!groups[key]) groups[key] = [];
               groups[key].push(e);
             });
@@ -2022,7 +2087,7 @@ export default function Home() {
                         >
                           <div className="flex items-center justify-between mb-2">
                             <p className="text-sm font-medium">
-                              {group.items.length}× {group.items[0].category} · {group.items[0].size}
+                              {group.items.length}× {group.items[0].category} · Size {group.items[0]._sizeBucket}
                             </p>
                             {aged && (
                               <span className="text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#A63A2E] text-white shrink-0">
@@ -2035,9 +2100,10 @@ export default function Home() {
                               <button
                                 key={e.id}
                                 onClick={() => openItem(e)}
-                                className="text-sm text-left text-[#2B2620] underline decoration-[#C9BFA3]"
+                                className="text-sm text-left text-[#2B2620] underline decoration-[#C9BFA3] flex items-center gap-1.5"
                               >
                                 {e.title}
+                                <span className="text-xs text-[#8A7F63] no-underline shrink-0">(labelled {e.size})</span>
                               </button>
                             ))}
                           </div>
