@@ -354,9 +354,9 @@ function effectiveQuantitySold(item) {
 
 function ListedToggles({ item, onToggle }) {
   const platforms = [
-    { field: "ebay_listed", label: "eBay", priceField: "ebay_listed_price" },
-    { field: "vinted_listed", label: "Vinted", priceField: "vinted_listed_price" },
-    { field: "depop_listed", label: "Depop", priceField: null },
+    { field: "ebay_listed", label: "eBay" },
+    { field: "vinted_listed", label: "Vinted" },
+    { field: "depop_listed", label: "Depop" },
   ];
   return (
     <div className="mb-5">
@@ -378,9 +378,6 @@ function ListedToggles({ item, onToggle }) {
             }`}
           >
             {item[p.field] ? "✓ " : ""}{p.label}
-            {item[p.field] && p.priceField && item[p.priceField] != null && (
-              <span className="font-mono"> · £{item[p.priceField]}</span>
-            )}
             {item[p.field] && item[`${p.field}_at`] && (
               <span className="opacity-70"> · {fmtDate(item[`${p.field}_at`])}</span>
             )}
@@ -523,7 +520,7 @@ function StockListRow({ item: e, onOpen, onDelete }) {
 
         {isFullyDone ? (
           <div className="flex items-center gap-3 flex-wrap mt-1.5 font-mono text-xs text-[#2B2620] font-semibold">
-            <span>Sold {(e.quantity || 1) > 1 ? `£${e.sale_price} ea` : `£${e.sale_price ?? "—"}`}</span>
+            <span>Sold {(e.quantity || 1) > 1 ? `£${e.sale_price} ea` : `£${e.sale_price ?? "—"}`}{e.sold_platform ? ` on ${e.sold_platform}` : ""}</span>
             {e.cost_price != null && <span>Paid £{e.cost_price}</span>}
             {e.sale_price != null && e.cost_price != null && (
               <span>Profit £{((e.sale_price - e.cost_price) * effectiveQuantitySold(e)).toFixed(2)}</span>
@@ -837,10 +834,16 @@ export default function Home() {
   const [currentBatch, setCurrentBatch] = useState("");
   const [currentCostPrice, setCurrentCostPrice] = useState("");
   const [currentQuantity, setCurrentQuantity] = useState(1);
+  const [currentItemType, setCurrentItemType] = useState("resale");
   const [batchFilter, setBatchFilter] = useState("all");
   const [stockSearch, setStockSearch] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [bargains, setBargains] = useState([]);
+  const [bargainSettings, setBargainSettings] = useState(null);
+  const [bargainSettingsDraft, setBargainSettingsDraft] = useState(null);
+  const [scanning, setScanning] = useState(false);
+  const [scanMessage, setScanMessage] = useState("");
   const [pipelineFilter, setPipelineFilter] = useState("all");
   const [capturing, setCapturing] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
@@ -869,7 +872,7 @@ export default function Home() {
 
   const fetchItems = useCallback(async () => {
     const leanColumns =
-      "id, title, thumbnail, status, sale_price, cost_price, sold_at, quantity, quantity_sold, created_at, category, size, batch, ebay_listed, vinted_listed, depop_listed, ebay_listed_at, vinted_listed_at, ebay_listed_price, vinted_listed_price, vinted_reduced_at, relisted_at, posted_at";
+      "id, title, thumbnail, status, sale_price, cost_price, sold_platform, sold_at, quantity, quantity_sold, created_at, category, size, batch, ebay_listed, vinted_listed, depop_listed, ebay_listed_at, vinted_listed_at, vinted_reduced_at, relisted_at, posted_at, item_type";
 
     let { data, error } = await supabase.from("items").select(leanColumns).order("created_at", { ascending: false });
 
@@ -889,6 +892,68 @@ export default function Home() {
     if (!unlocked) return;
     fetchItems();
   }, [unlocked, fetchItems]);
+
+  const fetchBargains = useCallback(async () => {
+    const { data, error } = await supabase.from("bargains").select("*").order("found_at", { ascending: false });
+    if (error) {
+      console.error("fetchBargains failed:", error);
+      return;
+    }
+    setBargains(data || []);
+  }, []);
+
+  const fetchBargainSettings = useCallback(async () => {
+    const { data } = await supabase.from("bargain_settings").select("*").eq("id", "default").single();
+    const settings = data || {
+      id: "default",
+      min_profit: 10,
+      min_roi_pct: 30,
+      max_purchase_price: 100,
+      min_discount_pct: 20,
+      categories: "",
+    };
+    setBargainSettings(settings);
+    setBargainSettingsDraft(settings);
+  }, []);
+
+  useEffect(() => {
+    if (!unlocked) return;
+    fetchBargains();
+    fetchBargainSettings();
+  }, [unlocked, fetchBargains, fetchBargainSettings]);
+
+  const saveBargainSettings = async () => {
+    if (!bargainSettingsDraft) return;
+    const payload = { ...bargainSettingsDraft, id: "default" };
+    const { error } = await supabase.from("bargain_settings").upsert(payload, { onConflict: "id" });
+    if (error) {
+      alert("Couldn't save settings: " + error.message);
+      return;
+    }
+    setBargainSettings(payload);
+  };
+
+  const runBargainScan = async () => {
+    setScanning(true);
+    setScanMessage("");
+    try {
+      const res = await fetch("/api/bargains-scan", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Scan failed");
+      setScanMessage(`Checked ${data.candidatesChecked} candidate(s), found ${data.bargainsFound} bargain(s).`);
+      fetchBargains();
+    } catch (err) {
+      console.error("Bargain scan failed:", err);
+      setScanMessage("Scan failed: " + (err.message || err));
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const dismissBargain = async (id) => {
+    await supabase.from("bargains").delete().eq("id", id);
+    fetchBargains();
+  };
 
   // Poll for updates while on the stock tab - fast (4s) while something's
   // actually processing so completion shows up quickly, otherwise slow (30s)
@@ -923,7 +988,7 @@ export default function Home() {
     try {
       const safePhotos = await ensureUnderSizeLimit(photos);
       const result = await analyzeItem(safePhotos, "full", confirmedFields || null, ebaySearchQuery || null);
-      await supabase
+      const { error: updateError } = await supabase
         .from("items")
         .update({
           title: result.title || "Untitled item",
@@ -948,6 +1013,11 @@ export default function Home() {
           status: "ready",
         })
         .eq("id", id);
+      // Supabase doesn't throw on a failed update by default - it just
+      // returns an error object - so this has to be checked explicitly, or a
+      // failure (e.g. a database column that doesn't exist) leaves the item
+      // stuck at "processing" forever with no visible error at all.
+      if (updateError) throw updateError;
     } catch (err) {
       console.error(err);
       await supabase.from("items").update({ status: "error", error_detail: err.message || String(err) }).eq("id", id);
@@ -1015,6 +1085,7 @@ export default function Home() {
           cost_price: currentCostPrice === "" ? null : Number(currentCostPrice),
           quantity: currentQuantity || 1,
           quantity_sold: 0,
+          item_type: currentItemType,
         })
         .select()
         .single();
@@ -1078,6 +1149,7 @@ export default function Home() {
         size: editDraft.size,
         brand: editDraft.brand,
         batch: editDraft.batch,
+        item_type: editDraft.item_type,
       })
       .eq("id", editDraft.id);
     setSelectedItem(editDraft);
@@ -1125,6 +1197,7 @@ export default function Home() {
   const [soldPriceInput, setSoldPriceInput] = useState("");
   const [costPriceInput, setCostPriceInput] = useState("");
   const [soldQtyInput, setSoldQtyInput] = useState("1");
+  const [soldPlatformInput, setSoldPlatformInput] = useState("");
 
   const [exporting, setExporting] = useState(false);
 
@@ -1158,6 +1231,10 @@ export default function Home() {
     // had 2 sold" being the common case; partial sales are the exception.
     const remaining = (item.quantity || 1) - (item.quantity_sold || 0);
     setSoldQtyInput(String(Math.max(1, remaining)));
+    // Guess the platform only when it's unambiguous - listed on exactly one
+    // of eBay/Vinted/Depop. Otherwise leave it blank and make you choose.
+    const listedOn = [item.ebay_listed && "eBay", item.vinted_listed && "Vinted", item.depop_listed && "Depop"].filter(Boolean);
+    setSoldPlatformInput(listedOn.length === 1 ? listedOn[0] : "");
   };
 
   const confirmSold = async () => {
@@ -1173,10 +1250,11 @@ export default function Home() {
     // item "ready" - no need to re-photograph the leftover stock.
     const sale_price = soldPriceInput === "" ? null : Number(soldPriceInput);
     const cost_price = costPriceInput === "" ? null : Number(costPriceInput);
+    const sold_platform = soldPlatformInput || null;
     const sold_at = new Date().toISOString();
     const status = remaining <= 0 ? "sold" : "ready";
 
-    const updates = { status, sale_price, cost_price, sold_at, quantity_sold };
+    const updates = { status, sale_price, cost_price, sold_platform, sold_at, quantity_sold };
     await supabase.from("items").update(updates).eq("id", soldFormFor.id);
     const updated = { ...soldFormFor, ...updates };
     setSelectedItem(updated);
@@ -1194,42 +1272,16 @@ export default function Home() {
     fetchItems();
   };
 
-  const [listingPriceFor, setListingPriceFor] = useState(null); // { item, field }
-  const [listingPriceInput, setListingPriceInput] = useState("");
-
-  const setPlatformState = async (item, field, newVal, priceOverride) => {
+  const togglePlatform = async (item, field) => {
+    const newVal = !item[field];
     const dateField = `${field}_at`;
     const newDate = newVal ? new Date().toISOString() : null;
-    const priceField = field === "ebay_listed" ? "ebay_listed_price" : field === "vinted_listed" ? "vinted_listed_price" : null;
     const updates = { [field]: newVal, [dateField]: newDate };
-    // Clear the listed price whenever a platform is turned off, and only ever
-    // set it when turning on - so a stale price never lingers on an unlisted item.
-    if (priceField) updates[priceField] = newVal ? priceOverride ?? null : null;
     await supabase.from("items").update(updates).eq("id", item.id);
     const updated = { ...item, ...updates };
     setSelectedItem(updated);
     setEditDraft((d) => (d ? { ...d, ...updates } : d));
     fetchItems();
-  };
-
-  const togglePlatform = (item, field) => {
-    const turningOn = !item[field];
-    if (turningOn && (field === "ebay_listed" || field === "vinted_listed")) {
-      const priceField = field === "ebay_listed" ? "ebay_listed_price" : "vinted_listed_price";
-      setListingPriceFor({ item, field });
-      setListingPriceInput(item[priceField] != null ? String(item[priceField]) : item.price_low != null ? String(item.price_low) : "");
-      return;
-    }
-    setPlatformState(item, field, turningOn);
-  };
-
-  const confirmListingPrice = () => {
-    if (!listingPriceFor) return;
-    const { item, field } = listingPriceFor;
-    const price = listingPriceInput === "" ? null : Number(listingPriceInput);
-    setPlatformState(item, field, true, price);
-    setListingPriceFor(null);
-    setListingPriceInput("");
   };
 
   const confirmPipelineAction = async (item, field) => {
@@ -1343,6 +1395,12 @@ export default function Home() {
             >
               Finances
             </button>
+            <button
+              onClick={() => setView("bargains")}
+              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "bargains" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
+            >
+              Bargains
+            </button>
           </div>
 
           <button
@@ -1390,6 +1448,7 @@ export default function Home() {
             { key: "bundles", label: "Bundles" },
             { key: "sold", label: "Sold" },
             { key: "finances", label: "Finances" },
+            { key: "bargains", label: "Bargains" },
           ].map((item) => (
             <button
               key={item.key}
@@ -1414,10 +1473,23 @@ export default function Home() {
             const activeItems = items.filter((e) => e.status !== "sold");
             // Needs Attention covers everything that's genuinely stuck:
             // needs_size/error block a listing from happening at all,
-            // ready_for_posting is a sold item waiting on you, and stale
-            // catches stock that's been listed 30+ days without selling.
+            // ready_for_posting is a sold item waiting on you, stale catches
+            // stock that's been listed 30+ days without selling anywhere, and
+            // add_to_vinted catches something listed on eBay 7+ days that
+            // hasn't been added to Vinted yet.
+            const needsVintedListing = (e) => {
+              const p = getPipelineInfo(e);
+              return p && p.stage === "ebay" && p.flag !== "none";
+            };
             const needsAttention = items
-              .filter((e) => e.status === "needs_size" || e.status === "error" || (e.status === "sold" && !e.posted_at) || isStaleListing(e))
+              .filter(
+                (e) =>
+                  e.status === "needs_size" ||
+                  e.status === "error" ||
+                  (e.status === "sold" && !e.posted_at) ||
+                  isStaleListing(e) ||
+                  needsVintedListing(e)
+              )
               .map((e) => ({
                 ...e,
                 _reason:
@@ -1425,14 +1497,16 @@ export default function Home() {
                     ? "status"
                     : e.status === "sold"
                     ? "ready_for_posting"
-                    : "stale",
+                    : isStaleListing(e)
+                    ? "stale"
+                    : "add_to_vinted",
               }));
 
             return (
               <>
                 <p className="font-serif text-2xl mb-6">Home</p>
 
-                <div className="grid grid-cols-2 gap-3 mb-8">
+                <div className="grid grid-cols-2 gap-3 mb-4">
                   <div className="rounded-sm p-3 border bg-[#F7F3E8] border-[#C9BFA3]">
                     <span className="text-xs uppercase tracking-wide block mb-1 text-[#8A7F63]">Active stock</span>
                     <span className="font-mono text-xl">{activeItems.length}</span>
@@ -1442,6 +1516,19 @@ export default function Home() {
                     <span className="font-mono text-xl">{soldItems.length}</span>
                   </div>
                 </div>
+
+                {bargains.length > 0 && (
+                  <button
+                    onClick={() => setView("bargains")}
+                    className="w-full mb-8 flex items-center justify-between bg-[#3F5E42]/10 border border-[#3F5E42]/40 rounded-sm p-3 text-left"
+                  >
+                    <span className="text-sm font-bold text-[#2B2620]">
+                      {bargains.length} bargain{bargains.length === 1 ? "" : "s"} found
+                    </span>
+                    <span className="text-[#3F5E42] text-lg">›</span>
+                  </button>
+                )}
+                {bargains.length === 0 && <div className="mb-8" />}
 
                 <div>
                   <p className="text-xs font-semibold text-[#A63A2E] uppercase tracking-wide mb-2">
@@ -1468,6 +1555,10 @@ export default function Home() {
                             <span className="inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm bg-[#A63A2E] text-white">
                               Not selling
                             </span>
+                          ) : e._reason === "add_to_vinted" ? (
+                            <span className="inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm bg-[#7A5980] text-white">
+                              Add to Vinted
+                            </span>
                           ) : (
                             <StatusBadge item={e} />
                           )}
@@ -1485,13 +1576,22 @@ export default function Home() {
       {view === "finances" && (
         <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
           {(() => {
+            const resaleItems = items.filter((e) => e.item_type !== "personal");
+            const personalItems = items.filter((e) => e.item_type === "personal");
+
             // Revenue comes from units actually sold (effectiveQuantitySold),
             // which can be >0 on a "ready" item too if only some of its
-            // quantity has sold so far - not just fully-sold items.
-            const revenue = items.reduce((s, e) => s + (Number(e.sale_price) || 0) * effectiveQuantitySold(e), 0);
+            // quantity has sold so far - not just fully-sold items. Personal
+            // items are excluded entirely - tracked separately below instead.
+            const revenue = resaleItems.reduce((s, e) => s + (Number(e.sale_price) || 0) * effectiveQuantitySold(e), 0);
             // Cost is money actually spent - per-unit cost × total quantity
             // ever captured for that item, summed across every item.
-            const cost = items.reduce((s, e) => s + (Number(e.cost_price) || 0) * (Number(e.quantity) || 1), 0);
+            const cost = resaleItems.reduce((s, e) => s + (Number(e.cost_price) || 0) * (Number(e.quantity) || 1), 0);
+
+            // Personal items get their own simple tally - kept for your own
+            // tracking, out of the resale revenue/cost/profit figures above.
+            const personalSoldItems = personalItems.filter((e) => effectiveQuantitySold(e) > 0);
+            const personalRevenue = personalSoldItems.reduce((s, e) => s + (Number(e.sale_price) || 0) * effectiveQuantitySold(e), 0);
 
             // Monthly trends - grouped by the month an item was last sold
             // (falling back to created_at for old sold items from before
@@ -1500,7 +1600,7 @@ export default function Home() {
             // quantity gets attributed to the most recent sale's month -
             // a simplification since individual sale events aren't logged.
             const monthGroups = {};
-            items
+            resaleItems
               .filter((e) => effectiveQuantitySold(e) > 0)
               .forEach((e) => {
                 const dateStr = e.sold_at || e.created_at;
@@ -1522,17 +1622,6 @@ export default function Home() {
                 ...v,
                 profit: v.revenue - v.cost,
               }));
-
-            // Sum of what's currently asked across active, listed items on each
-            // platform - not revenue (nothing's sold yet), just total value on the shelf.
-            const ebayListingValue = items
-              .filter((e) => e.status === "ready" && e.ebay_listed)
-              .reduce((s, e) => s + (Number(e.ebay_listed_price) || 0), 0);
-            const vintedListingValue = items
-              .filter((e) => e.status === "ready" && e.vinted_listed)
-              .reduce((s, e) => s + (Number(e.vinted_listed_price) || 0), 0);
-            const ebayListingCount = items.filter((e) => e.status === "ready" && e.ebay_listed).length;
-            const vintedListingCount = items.filter((e) => e.status === "ready" && e.vinted_listed).length;
 
             return (
               <>
@@ -1572,25 +1661,6 @@ export default function Home() {
                   ))}
                 </div>
 
-                <div className="grid grid-cols-2 gap-3 mb-8">
-                  <div className={`rounded-sm p-3 border ${CATEGORY_STYLES.ebay.tint}`}>
-                    <span className={`text-xs uppercase tracking-wide block mb-1 ${CATEGORY_STYLES.ebay.text}`}>
-                      Current eBay listings ({ebayListingCount})
-                    </span>
-                    <span className={`font-mono text-xl font-bold ${CATEGORY_STYLES.ebay.text}`}>
-                      £{ebayListingValue.toFixed(2)}
-                    </span>
-                  </div>
-                  <div className={`rounded-sm p-3 border ${CATEGORY_STYLES.vinted.tint}`}>
-                    <span className={`text-xs uppercase tracking-wide block mb-1 ${CATEGORY_STYLES.vinted.text}`}>
-                      Current Vinted listings ({vintedListingCount})
-                    </span>
-                    <span className={`font-mono text-xl font-bold ${CATEGORY_STYLES.vinted.text}`}>
-                      £{vintedListingValue.toFixed(2)}
-                    </span>
-                  </div>
-                </div>
-
                 {monthTrends.length === 0 ? (
                   <p className="text-sm text-[#8A7F63] py-8 text-center">No sales yet to show trends for.</p>
                 ) : (
@@ -1615,12 +1685,146 @@ export default function Home() {
                     </div>
                   </div>
                 )}
+
+                {personalSoldItems.length > 0 && (
+                  <div className="mt-6 pt-6 border-t border-[#C9BFA3]">
+                    <div className={`rounded-sm p-3 border ${CATEGORY_STYLES.vinted.tint}`}>
+                      <span className={`text-xs uppercase tracking-wide block mb-1 ${CATEGORY_STYLES.vinted.text}`}>
+                        Personal sales ({personalSoldItems.length}) — kept separate from the figures above
+                      </span>
+                      <span className={`font-mono text-xl font-bold ${CATEGORY_STYLES.vinted.text}`}>
+                        £{personalRevenue.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </>
             );
           })()}
         </div>
       )}
 
+      {view === "bargains" && (
+        <div className="flex-1 p-4 sm:p-8 max-w-3xl w-full mx-auto">
+          <p className="font-serif text-2xl mb-1">Bargains</p>
+          <p className="text-sm text-[#8A7F63] mb-5">
+            Retailer clearance stock checked against real eBay prices — the numbers decide, not a guess.
+          </p>
+
+          <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-4 mb-6">
+            <p className="text-xs font-semibold text-[#6B6250] uppercase tracking-wide mb-3">Filters</p>
+            {bargainSettingsDraft && (
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <div>
+                  <label className="text-xs text-[#8A7F63] mb-1 block">Min profit (£)</label>
+                  <input
+                    type="number"
+                    value={bargainSettingsDraft.min_profit}
+                    onChange={(e) => setBargainSettingsDraft({ ...bargainSettingsDraft, min_profit: Number(e.target.value) })}
+                    className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-[#8A7F63] mb-1 block">Min ROI (%)</label>
+                  <input
+                    type="number"
+                    value={bargainSettingsDraft.min_roi_pct}
+                    onChange={(e) => setBargainSettingsDraft({ ...bargainSettingsDraft, min_roi_pct: Number(e.target.value) })}
+                    className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-[#8A7F63] mb-1 block">Max purchase price (£)</label>
+                  <input
+                    type="number"
+                    value={bargainSettingsDraft.max_purchase_price}
+                    onChange={(e) => setBargainSettingsDraft({ ...bargainSettingsDraft, max_purchase_price: Number(e.target.value) })}
+                    className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-[#8A7F63] mb-1 block">Min discount off RRP (%)</label>
+                  <input
+                    type="number"
+                    value={bargainSettingsDraft.min_discount_pct}
+                    onChange={(e) => setBargainSettingsDraft({ ...bargainSettingsDraft, min_discount_pct: Number(e.target.value) })}
+                    className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="text-xs text-[#8A7F63] mb-1 block">Categories to include (comma separated, blank = all)</label>
+                  <input
+                    value={bargainSettingsDraft.categories || ""}
+                    onChange={(e) => setBargainSettingsDraft({ ...bargainSettingsDraft, categories: e.target.value })}
+                    placeholder="e.g. Home & Furniture, Kitchen"
+                    className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
+                  />
+                </div>
+              </div>
+            )}
+            <button
+              onClick={saveBargainSettings}
+              className="w-full py-2 rounded bg-[#DCD4BC] text-[#2B2620] font-medium text-sm"
+            >
+              Save filters
+            </button>
+          </div>
+
+          <button
+            onClick={runBargainScan}
+            disabled={scanning}
+            className="w-full py-3 rounded bg-[#A9822E] text-[#2B2620] font-bold flex items-center justify-center gap-2 disabled:opacity-50 mb-2"
+          >
+            {scanning ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+            {scanning ? "Scanning B&M…" : "Scan now"}
+          </button>
+          {scanMessage && <p className="text-xs text-[#8A7F63] text-center mb-6">{scanMessage}</p>}
+          {!scanMessage && <div className="mb-6" />}
+
+          {bargains.length === 0 ? (
+            <p className="text-sm text-[#8A7F63] py-8 text-center">
+              No bargains found yet — hit "Scan now" to check B&M's current clearance stock.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {bargains.map((b) => (
+                <div key={b.id} className="flex items-center gap-3 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-3">
+                  <div className="w-16 h-16 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0">
+                    {b.image_url && <img src={b.image_url} alt="" className="w-full h-full object-cover" />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-bold text-[#2B2620] truncate">{b.product_name}</p>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 font-mono text-xs text-[#2B2620]">
+                      <span className="bg-[#6B6250] text-white px-1.5 py-0.5 rounded-sm font-sans font-bold">{b.retailer}</span>
+                      <span>£{b.retailer_price} <span className="text-[#8A7F63]">(RRP £{b.rrp}, -{b.discount_pct}%)</span></span>
+                      <span className="text-[#3F5E42] font-bold">Profit £{b.profit} · {b.roi_pct}% ROI</span>
+                      {!b.in_stock && <span className="text-[#A63A2E] font-bold">Check availability</span>}
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-1 shrink-0">
+                    {b.product_url && (
+                      <a
+                        href={b.product_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs font-bold text-center bg-[#A9822E] text-[#2B2620] px-2.5 py-1.5 rounded-sm"
+                      >
+                        View
+                      </a>
+                    )}
+                    <button
+                      onClick={() => dismissBargain(b.id)}
+                      className="text-xs text-[#8A7F63] px-2.5 py-1"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {view === "pipeline" && (
         <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
@@ -1841,6 +2045,36 @@ export default function Home() {
                 One stock entry for {currentQuantity} identical items — no need to photograph the same thing twice. Resets to 1 after each capture.
               </p>
             )}
+          </div>
+
+          <div className="mb-4">
+            <label className="text-xs text-[#8A7F63] uppercase tracking-wide mb-1 block">
+              Item type
+            </label>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setCurrentItemType("resale")}
+                className={`flex-1 py-2.5 rounded-sm text-sm font-medium border transition ${
+                  currentItemType === "resale"
+                    ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620] font-bold"
+                    : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
+                }`}
+              >
+                Resale stock
+              </button>
+              <button
+                type="button"
+                onClick={() => setCurrentItemType("personal")}
+                className={`flex-1 py-2.5 rounded-sm text-sm font-medium border transition ${
+                  currentItemType === "personal"
+                    ? "bg-[#7A5980] border-[#7A5980] text-white font-bold"
+                    : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
+                }`}
+              >
+                Personal item
+              </button>
+            </div>
           </div>
 
           <p className="text-[#6B6250] text-sm mb-4">
@@ -2175,9 +2409,15 @@ export default function Home() {
                         </span>
                       </div>
                     )}
+                    {selectedItem.sold_platform && (
+                      <div>
+                        <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Platform</span>
+                        <span>{selectedItem.sold_platform}</span>
+                      </div>
+                    )}
                     {selectedItem.sold_at && (
                       <div>
-                        <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Sold on</span>
+                        <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Sold date</span>
                         <span>{fmtDate(selectedItem.sold_at)}</span>
                       </div>
                     )}
@@ -2223,6 +2463,25 @@ export default function Home() {
                     </p>
                   )}
                   <div className="flex flex-col gap-3">
+                    <div>
+                      <label className="text-xs text-[#8A7F63] mb-1 block">Sold on which platform?</label>
+                      <div className="flex gap-2 flex-wrap">
+                        {["eBay", "Vinted", "Depop", "Other"].map((p) => (
+                          <button
+                            key={p}
+                            type="button"
+                            onClick={() => setSoldPlatformInput(p)}
+                            className={`px-3 py-1.5 rounded-sm text-sm font-medium border transition ${
+                              soldPlatformInput === p
+                                ? "bg-[#3F5E42]/15 border-[#3F5E42]/40 text-[#3F5E42]"
+                                : "bg-[#EDE6D6] border-[#C9BFA3] text-[#6B6250]"
+                            }`}
+                          >
+                            {p}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                     {(soldFormFor.quantity || 1) - (soldFormFor.quantity_sold || 0) > 1 && (
                       <div>
                         <label className="text-xs text-[#8A7F63] mb-1 block">How many sold?</label>
@@ -2267,47 +2526,10 @@ export default function Home() {
                     </button>
                     <button
                       onClick={confirmSold}
-                      className="flex-1 py-2.5 rounded bg-[#A9822E] text-[#2B2620] font-bold"
+                      disabled={!soldPlatformInput}
+                      className="flex-1 py-2.5 rounded bg-[#A9822E] text-[#2B2620] font-bold disabled:opacity-40"
                     >
                       Confirm
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {listingPriceFor && (
-              <div className="fixed inset-0 bg-[#2B2620]/60 z-30 flex items-end sm:items-center justify-center p-4">
-                <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-5 w-full max-w-sm">
-                  <p className="font-serif text-lg mb-1">
-                    List "{listingPriceFor.item.title}" on {listingPriceFor.field === "ebay_listed" ? "eBay" : "Vinted"}
-                  </p>
-                  <p className="text-xs text-[#8A7F63] mb-4">What price did you list it at?</p>
-                  <div>
-                    <label className="text-xs text-[#8A7F63] mb-1 block">Listed price (£)</label>
-                    <input
-                      type="number"
-                      value={listingPriceInput}
-                      onChange={(e) => setListingPriceInput(e.target.value)}
-                      className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
-                      autoFocus
-                    />
-                  </div>
-                  <div className="flex gap-2 mt-5">
-                    <button
-                      onClick={() => {
-                        setListingPriceFor(null);
-                        setListingPriceInput("");
-                      }}
-                      className="flex-1 py-2.5 rounded bg-[#DCD4BC] text-[#2B2620] font-medium"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={confirmListingPrice}
-                      className="flex-1 py-2.5 rounded bg-[#A9822E] text-[#2B2620] font-bold"
-                    >
-                      Confirm listing
                     </button>
                   </div>
                 </div>
@@ -2514,6 +2736,34 @@ export default function Home() {
                           <option key={b} value={b} />
                         ))}
                       </datalist>
+                    </div>
+
+                    <div>
+                      <label className="text-xs text-[#8A7F63] mb-1 block">Item type</label>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setEditDraft({ ...editDraft, item_type: "resale" })}
+                          className={`flex-1 py-2 rounded-sm text-sm font-medium border transition ${
+                            (editDraft.item_type || "resale") === "resale"
+                              ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620] font-bold"
+                              : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
+                          }`}
+                        >
+                          Resale stock
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditDraft({ ...editDraft, item_type: "personal" })}
+                          className={`flex-1 py-2 rounded-sm text-sm font-medium border transition ${
+                            editDraft.item_type === "personal"
+                              ? "bg-[#7A5980] border-[#7A5980] text-white font-bold"
+                              : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
+                          }`}
+                        >
+                          Personal item
+                        </button>
+                      </div>
                     </div>
 
                     <div>
