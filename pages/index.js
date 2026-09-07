@@ -1008,7 +1008,8 @@ export default function Home() {
     if (!unlocked) return;
     fetchBargains();
     fetchBargainSettings();
-  }, [unlocked, fetchBargains, fetchBargainSettings]);
+    fetchLastBackup();
+  }, [unlocked, fetchBargains, fetchBargainSettings, fetchLastBackup]);
 
   const saveBargainSettings = async () => {
     if (!bargainSettingsDraft) return;
@@ -1288,6 +1289,23 @@ export default function Home() {
   const [soldPlatformInput, setSoldPlatformInput] = useState("");
 
   const [exporting, setExporting] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const [lastBackupAt, setLastBackupAt] = useState(null);
+
+  const fetchLastBackup = useCallback(async () => {
+    try {
+      const { data } = await supabase.from("app_meta").select("last_backup_at").eq("id", "default").single();
+      setLastBackupAt(data?.last_backup_at || null);
+    } catch (err) {
+      // No row yet (first time ever) - treated the same as "never backed up".
+    }
+  }, []);
+
+  const recordBackup = async () => {
+    const now = new Date().toISOString();
+    await supabase.from("app_meta").upsert({ id: "default", last_backup_at: now }, { onConflict: "id" });
+    setLastBackupAt(now);
+  };
 
   const exportBackup = async () => {
     setExporting(true);
@@ -1303,11 +1321,100 @@ export default function Home() {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      await recordBackup();
     } catch (err) {
       console.error("Export failed:", err);
       alert("Backup export failed: " + (err.message || err));
     } finally {
       setExporting(false);
+    }
+  };
+
+  // Excel export for browsing/editing in a spreadsheet - one row per item,
+  // photos/thumbnail deliberately left out (huge base64/URLs, not useful in
+  // a spreadsheet cell) since the JSON backup above already covers full
+  // fidelity including photos. This is the "look at and sanity-check your
+  // stock in a table" export, not the disaster-recovery one.
+  const exportBackupExcel = async () => {
+    setExportingExcel(true);
+    try {
+      const { data, error } = await supabase.from("items").select("*").order("created_at", { ascending: false });
+      if (error) throw error;
+      const allItems = data || [];
+
+      // Stock tab - your priority fields (box, dates, prices, sold info) up
+      // front, AI pricing detail and descriptive text pushed to the end.
+      const rows = allItems.map((item) => ({
+        "Stock #": stockNumber(item),
+        Batch: item.batch || "",
+        "Captured date": item.created_at ? item.created_at.slice(0, 10) : "",
+        Title: item.title || "",
+        Status: item.status || "",
+        "Cost price (£)": item.cost_price ?? "",
+        "Sale price (£)": item.sale_price ?? "",
+        "Sold platform": item.sold_platform || "",
+        "Sold date": item.sold_at ? item.sold_at.slice(0, 10) : "",
+        "Posted date": item.posted_at ? item.posted_at.slice(0, 10) : "",
+        "Item type": item.item_type === "personal" ? "Personal" : "Resale",
+        Category: item.category || "",
+        Size: item.size || "",
+        Brand: item.brand || "",
+        Condition: item.condition || "",
+        Quantity: item.quantity ?? 1,
+        "Quantity sold": item.quantity_sold ?? 0,
+        "Recommended price (£)": item.recommended_price ?? "",
+        "Price low (£)": item.price_low ?? "",
+        "Price high (£)": item.price_high ?? "",
+        "Price confidence": item.price_confidence || "",
+        "Vinted price low (£)": item.vinted_price_low ?? "",
+        "Vinted price high (£)": item.vinted_price_high ?? "",
+        Demand: item.demand || "",
+        "Listed on eBay": item.ebay_listed ? "Yes" : "No",
+        "Listed on Vinted": item.vinted_listed ? "Yes" : "No",
+        "Listed on Depop": item.depop_listed ? "Yes" : "No",
+        "Verify before listing": Array.isArray(item.verify_before_listing) ? item.verify_before_listing.join("; ") : "",
+        Notes: item.notes || "",
+        Description: item.description || "",
+      }));
+
+      // Sold tab - tax-shaped, one row per completed sale. Resale items only
+      // (personal sales excluded, same split as the Finances page) and only
+      // items with at least one unit actually sold - the numbers are ready
+      // to hand over as-is, no cleanup needed.
+      const soldRows = allItems
+        .filter((item) => item.item_type !== "personal" && effectiveQuantitySold(item) > 0)
+        .sort((a, b) => new Date(b.sold_at || 0) - new Date(a.sold_at || 0))
+        .map((item) => {
+          const qty = effectiveQuantitySold(item);
+          const salePrice = Number(item.sale_price) || 0;
+          const costPrice = Number(item.cost_price) || 0;
+          const totalRevenue = Math.round(salePrice * qty * 100) / 100;
+          const totalCost = Math.round(costPrice * qty * 100) / 100;
+          return {
+            "Date sold": item.sold_at ? item.sold_at.slice(0, 10) : "",
+            Item: item.title || "",
+            Box: item.batch || "",
+            Platform: item.sold_platform || "",
+            "Quantity sold": qty,
+            "Sale price per item (£)": salePrice,
+            "Total revenue (£)": totalRevenue,
+            "Cost per item (£)": costPrice,
+            "Total cost (£)": totalCost,
+            "Profit (£)": Math.round((totalRevenue - totalCost) * 100) / 100,
+          };
+        });
+
+      const XLSX = await import("xlsx");
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(soldRows), "Sold");
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), "Stock");
+      XLSX.writeFile(workbook, `itemgen-stock-${new Date().toISOString().slice(0, 10)}.xlsx`);
+      await recordBackup();
+    } catch (err) {
+      console.error("Excel export failed:", err);
+      alert("Excel export failed: " + (err.message || err));
+    } finally {
+      setExportingExcel(false);
     }
   };
 
@@ -1502,7 +1609,7 @@ export default function Home() {
               <SettingsIcon size={16} />
             </button>
             {settingsOpen && (
-              <div className="absolute right-0 mt-1 w-56 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm shadow-lg z-20 p-1">
+              <div className="absolute right-0 mt-1 w-64 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm shadow-lg z-20 p-1">
                 <button
                   onClick={() => {
                     setSettingsOpen(false);
@@ -1512,7 +1619,18 @@ export default function Home() {
                   className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#2B2620] hover:bg-[#DCD4BC] flex items-center gap-2 disabled:opacity-50"
                 >
                   {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-                  {exporting ? "Preparing backup…" : "Export full backup"}
+                  {exporting ? "Preparing backup…" : "Export full backup (JSON)"}
+                </button>
+                <button
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    exportBackupExcel();
+                  }}
+                  disabled={exportingExcel}
+                  className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#2B2620] hover:bg-[#DCD4BC] flex items-center gap-2 disabled:opacity-50"
+                >
+                  {exportingExcel ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                  {exportingExcel ? "Preparing spreadsheet…" : "Export stock as Excel"}
                 </button>
               </div>
             )}
@@ -1597,6 +1715,25 @@ export default function Home() {
                     <span className="font-mono text-xl">{soldItems.length}</span>
                   </div>
                 </div>
+
+                {(() => {
+                  const daysSinceBackup = lastBackupAt ? daysSince(lastBackupAt) : null;
+                  const dueForBackup = daysSinceBackup === null || daysSinceBackup >= 14;
+                  if (!dueForBackup) return null;
+                  return (
+                    <button
+                      onClick={() => setSettingsOpen(true)}
+                      className="w-full mb-4 flex items-center justify-between bg-[#8A7F63]/10 border border-[#8A7F63]/30 rounded-sm p-3 text-left"
+                    >
+                      <span className="text-sm text-[#2B2620]">
+                        {lastBackupAt
+                          ? `Last backup was ${daysSinceBackup} day${daysSinceBackup === 1 ? "" : "s"} ago`
+                          : "You haven't backed up your stock yet"}
+                      </span>
+                      <span className="text-xs font-bold text-[#6B6250] shrink-0 ml-2">Back up now</span>
+                    </button>
+                  );
+                })()}
 
                 <div>
                   <p className="text-xs font-semibold text-[#A63A2E] uppercase tracking-wide mb-2">
