@@ -406,6 +406,34 @@ function daysSince(iso) {
   return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
 }
 
+// Pulls a gender/age bracket out of the AI-generated category text (e.g.
+// "Men's Jumpers & Cardigans" -> "Men's") so Bundles can filter by it
+// separately from the specific garment type.
+const GENDER_PATTERNS = [
+  { label: "Men's", regex: /\bmen'?s\b/i },
+  { label: "Women's", regex: /\bwomen'?s\b|\bladies'?\b/i },
+  { label: "Boys'", regex: /\bboys?'?\b/i },
+  { label: "Girls'", regex: /\bgirls?'?\b/i },
+  { label: "Kids'", regex: /\bkids'?\b|\bchildren'?s\b|\bunisex\b/i },
+];
+
+function parseGender(category) {
+  if (!category) return null;
+  const match = GENDER_PATTERNS.find((g) => g.regex.test(category));
+  return match ? match.label : null;
+}
+
+// Whatever's left of the category text once the gender bracket is stripped -
+// "Men's Jumpers & Cardigans" -> "Jumpers & Cardigans".
+function parseGarmentType(category) {
+  if (!category) return "";
+  let t = category;
+  GENDER_PATTERNS.forEach((g) => {
+    t = t.replace(g.regex, "");
+  });
+  return t.replace(/^[\s'-]+|[\s'-]+$/g, "").trim() || category.trim();
+}
+
 function isStaleListing(item) {
   if (item.status !== "ready") return false;
   const firstListedAt = [item.ebay_listed_at, item.vinted_listed_at].filter(Boolean).sort()[0];
@@ -837,6 +865,9 @@ export default function Home() {
   const [currentItemType, setCurrentItemType] = useState("resale");
   const [batchFilter, setBatchFilter] = useState("all");
   const [stockSearch, setStockSearch] = useState("");
+  const [bundleFilterGender, setBundleFilterGender] = useState("all");
+  const [bundleFilterGarment, setBundleFilterGarment] = useState("all");
+  const [bundleFilterSize, setBundleFilterSize] = useState("all");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [bargains, setBargains] = useState([]);
@@ -1395,12 +1426,6 @@ export default function Home() {
             >
               Finances
             </button>
-            <button
-              onClick={() => setView("bargains")}
-              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "bargains" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
-            >
-              Bargains
-            </button>
           </div>
 
           <button
@@ -1448,7 +1473,6 @@ export default function Home() {
             { key: "bundles", label: "Bundles" },
             { key: "sold", label: "Sold" },
             { key: "finances", label: "Finances" },
-            { key: "bargains", label: "Bargains" },
           ].map((item) => (
             <button
               key={item.key}
@@ -1516,19 +1540,6 @@ export default function Home() {
                     <span className="font-mono text-xl">{soldItems.length}</span>
                   </div>
                 </div>
-
-                {bargains.length > 0 && (
-                  <button
-                    onClick={() => setView("bargains")}
-                    className="w-full mb-8 flex items-center justify-between bg-[#3F5E42]/10 border border-[#3F5E42]/40 rounded-sm p-3 text-left"
-                  >
-                    <span className="text-sm font-bold text-[#2B2620]">
-                      {bargains.length} bargain{bargains.length === 1 ? "" : "s"} found
-                    </span>
-                    <span className="text-[#3F5E42] text-lg">›</span>
-                  </button>
-                )}
-                {bargains.length === 0 && <div className="mb-8" />}
 
                 <div>
                   <p className="text-xs font-semibold text-[#A63A2E] uppercase tracking-wide mb-2">
@@ -1891,10 +1902,34 @@ export default function Home() {
       {view === "bundles" && (
         <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
           {(() => {
-            // Same category + size, count >= 2 - only makes sense for items
-            // not yet sold. NOTE: this grouping logic is a known rough draft -
-            // paused for improvement, just relocated to its own tab for now.
-            const readyItems = items.filter((e) => e.status === "ready");
+            const AGED_DAYS_THRESHOLD = 60; // roughly "2 months" - worth calling out for bundling/discounting
+
+            const readyItems = items
+              .filter((e) => e.status === "ready")
+              .map((e) => ({
+                ...e,
+                _gender: parseGender(e.category),
+                _garment: parseGarmentType(e.category),
+                _ageDays: daysSince(e.created_at) ?? 0,
+              }));
+
+            // Build filter option lists from what's actually in stock, not a
+            // fixed hardcoded list - so it always matches your real categories.
+            const genderOptions = [...new Set(readyItems.map((e) => e._gender).filter(Boolean))].sort();
+            const garmentOptions = [...new Set(readyItems.map((e) => e._garment).filter(Boolean))].sort();
+            const sizeOptions = [...new Set(readyItems.map((e) => e.size).filter(Boolean))].sort();
+
+            const filtered = readyItems.filter(
+              (e) =>
+                (bundleFilterGender === "all" || e._gender === bundleFilterGender) &&
+                (bundleFilterGarment === "all" || e._garment === bundleFilterGarment) &&
+                (bundleFilterSize === "all" || e.size === bundleFilterSize)
+            );
+            const filtersActive = bundleFilterGender !== "all" || bundleFilterGarment !== "all" || bundleFilterSize !== "all";
+
+            // Same category + size, count >= 2 - the automatic suggestion
+            // list. Sorted so groups containing older stock surface first,
+            // since ageing stock is exactly what most needs bundling out.
             const groups = {};
             readyItems.forEach((e) => {
               if (!e.category || !e.size) return;
@@ -1902,37 +1937,113 @@ export default function Home() {
               if (!groups[key]) groups[key] = [];
               groups[key].push(e);
             });
-            const bundleSuggestions = Object.values(groups).filter((g) => g.length >= 2);
+            const bundleSuggestions = Object.values(groups)
+              .filter((g) => g.length >= 2)
+              .map((g) => ({ items: g, maxAge: Math.max(...g.map((e) => e._ageDays)) }))
+              .sort((a, b) => b.maxAge - a.maxAge);
 
             return (
               <>
                 <p className="font-serif text-2xl mb-1">Bundles</p>
                 <p className="text-sm text-[#8A7F63] mb-5">
-                  Items that share a category and size — worth listing together.
+                  Browse active stock by gender, garment type, and size to find bundle matches yourself, or check the suggestions below.
                 </p>
 
+                <div className="grid grid-cols-3 gap-2 mb-6">
+                  <div>
+                    <label className="text-xs text-[#8A7F63] mb-1 block">Gender</label>
+                    <select
+                      value={bundleFilterGender}
+                      onChange={(e) => setBundleFilterGender(e.target.value)}
+                      className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-2 py-2 text-sm"
+                    >
+                      <option value="all">All</option>
+                      {genderOptions.map((g) => (
+                        <option key={g} value={g}>{g}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-[#8A7F63] mb-1 block">Garment</label>
+                    <select
+                      value={bundleFilterGarment}
+                      onChange={(e) => setBundleFilterGarment(e.target.value)}
+                      className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-2 py-2 text-sm"
+                    >
+                      <option value="all">All</option>
+                      {garmentOptions.map((g) => (
+                        <option key={g} value={g}>{g}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-xs text-[#8A7F63] mb-1 block">Size</label>
+                    <select
+                      value={bundleFilterSize}
+                      onChange={(e) => setBundleFilterSize(e.target.value)}
+                      className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-2 py-2 text-sm"
+                    >
+                      <option value="all">All</option>
+                      {sizeOptions.map((s) => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {filtersActive && (
+                  <div className="mb-8">
+                    <p className="text-xs font-semibold text-[#6B6250] uppercase tracking-wide mb-2">
+                      {filtered.length} matching item{filtered.length === 1 ? "" : "s"}
+                    </p>
+                    {filtered.length === 0 ? (
+                      <p className="text-sm text-[#8A7F63] py-4 text-center">Nothing matches those filters right now.</p>
+                    ) : (
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                        {filtered.map((e) => (
+                          <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <p className="text-xs font-semibold text-[#A9822E] uppercase tracking-wide mb-2">Suggested bundles</p>
                 {bundleSuggestions.length === 0 ? (
                   <p className="text-sm text-[#8A7F63] py-8 text-center">No bundle matches right now.</p>
                 ) : (
                   <div className="flex flex-col gap-2">
-                    {bundleSuggestions.map((group, i) => (
-                      <div key={i} className="bg-[#A9822E]/8 border border-[#A9822E]/30 rounded-sm p-3">
-                        <p className="text-sm font-medium mb-2">
-                          {group.length}× {group[0].category} · {group[0].size}
-                        </p>
-                        <div className="flex flex-col gap-1.5">
-                          {group.map((e) => (
-                            <button
-                              key={e.id}
-                              onClick={() => openItem(e)}
-                              className="text-sm text-left text-[#2B2620] underline decoration-[#C9BFA3]"
-                            >
-                              {e.title}
-                            </button>
-                          ))}
+                    {bundleSuggestions.map((group, i) => {
+                      const aged = group.maxAge >= AGED_DAYS_THRESHOLD;
+                      return (
+                        <div
+                          key={i}
+                          className={`rounded-sm p-3 border ${aged ? "bg-[#A63A2E]/8 border-[#A63A2E]/30" : "bg-[#A9822E]/8 border-[#A9822E]/30"}`}
+                        >
+                          <div className="flex items-center justify-between mb-2">
+                            <p className="text-sm font-medium">
+                              {group.items.length}× {group.items[0].category} · {group.items[0].size}
+                            </p>
+                            {aged && (
+                              <span className="text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#A63A2E] text-white shrink-0">
+                                Aged {group.maxAge}d
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex flex-col gap-1.5">
+                            {group.items.map((e) => (
+                              <button
+                                key={e.id}
+                                onClick={() => openItem(e)}
+                                className="text-sm text-left text-[#2B2620] underline decoration-[#C9BFA3]"
+                              >
+                                {e.title}
+                              </button>
+                            ))}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </>
