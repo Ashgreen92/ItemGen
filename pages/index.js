@@ -38,22 +38,89 @@ async function urlToDataUrl(url) {
 
 // ---------- image helpers ----------
 
-function compressImage(file, maxWidth, quality) {
+// Reads the JPEG's EXIF orientation tag directly from the raw file bytes.
+// Phones store rotation as an instruction alongside the photo rather than
+// rotating the actual pixels - canvas.toDataURL() strips that instruction
+// entirely, so this has to be read from the original file, before the very
+// first canvas draw, or the rotation hint is lost for good. Only reads the
+// first 128KB since EXIF data always sits near the start of a JPEG.
+function getExifOrientation(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const view = new DataView(e.target.result);
+        if (view.getUint16(0, false) !== 0xffd8) return resolve(1); // not a JPEG
+        let offset = 2;
+        const length = view.byteLength;
+        while (offset < length) {
+          const marker = view.getUint16(offset, false);
+          offset += 2;
+          if (marker === 0xffe1) {
+            if (view.getUint32(offset + 2, false) !== 0x45786966) return resolve(1); // "Exif"
+            const tiffOffset = offset + 8;
+            const little = view.getUint16(tiffOffset, false) === 0x4949;
+            const firstIfdOffset = view.getUint32(tiffOffset + 4, little);
+            const dirOffset = tiffOffset + firstIfdOffset;
+            const entries = view.getUint16(dirOffset, little);
+            for (let i = 0; i < entries; i++) {
+              const entryOffset = dirOffset + 2 + i * 12;
+              if (view.getUint16(entryOffset, little) === 0x0112) {
+                return resolve(view.getUint16(entryOffset + 8, little));
+              }
+            }
+            return resolve(1);
+          } else if ((marker & 0xff00) !== 0xff00) {
+            break;
+          } else {
+            offset += view.getUint16(offset, false);
+          }
+        }
+        resolve(1);
+      } catch (err) {
+        resolve(1); // fail safe - treat as already correctly oriented rather than break capture
+      }
+    };
+    reader.onerror = () => resolve(1);
+    reader.readAsArrayBuffer(file.slice(0, 131072));
+  });
+}
+
+async function compressImage(file, maxWidth, quality) {
+  const orientation = await getExifOrientation(file);
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       const img = new Image();
       img.onload = () => {
-        let w = img.width, h = img.height;
-        if (w > maxWidth) {
-          h = Math.round(h * (maxWidth / w));
-          w = maxWidth;
+        let drawW = img.width, drawH = img.height;
+        if (drawW > maxWidth) {
+          drawH = Math.round(drawH * (maxWidth / drawW));
+          drawW = maxWidth;
         }
+        // Orientations 5-8 involve a 90-degree turn, so the canvas itself
+        // needs its width/height swapped to hold the rotated result.
+        const swapDims = orientation >= 5 && orientation <= 8;
         const canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
+        canvas.width = swapDims ? drawH : drawW;
+        canvas.height = swapDims ? drawW : drawH;
         const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, w, h);
+
+        // Standard EXIF-orientation-to-canvas-transform mapping - rotates/
+        // flips the drawing context to match what the phone recorded, so
+        // the actual pixels come out right-way-up in the saved file.
+        switch (orientation) {
+          case 2: ctx.transform(-1, 0, 0, 1, drawW, 0); break;
+          case 3: ctx.transform(-1, 0, 0, -1, drawW, drawH); break;
+          case 4: ctx.transform(1, 0, 0, -1, 0, drawH); break;
+          case 5: ctx.transform(0, 1, 1, 0, 0, 0); break;
+          case 6: ctx.transform(0, 1, -1, 0, drawH, 0); break;
+          case 7: ctx.transform(0, -1, -1, 0, drawH, drawW); break;
+          case 8: ctx.transform(0, -1, 1, 0, 0, drawW); break;
+          default: break; // 1, or unknown - no rotation needed
+        }
+
+        ctx.drawImage(img, 0, 0, drawW, drawH);
         resolve(canvas.toDataURL("image/jpeg", quality));
       };
       img.onerror = () => reject(new Error("Could not read image"));
