@@ -1004,6 +1004,17 @@ export default function Home() {
     setBargainSettingsDraft(settings);
   }, []);
 
+  const [lastBackupAt, setLastBackupAt] = useState(null);
+
+  const fetchLastBackup = useCallback(async () => {
+    try {
+      const { data } = await supabase.from("app_meta").select("last_backup_at").eq("id", "default").single();
+      setLastBackupAt(data?.last_backup_at || null);
+    } catch (err) {
+      // No row yet (first time ever) - treated the same as "never backed up".
+    }
+  }, []);
+
   useEffect(() => {
     if (!unlocked) return;
     fetchBargains();
@@ -1290,16 +1301,6 @@ export default function Home() {
 
   const [exporting, setExporting] = useState(false);
   const [exportingExcel, setExportingExcel] = useState(false);
-  const [lastBackupAt, setLastBackupAt] = useState(null);
-
-  const fetchLastBackup = useCallback(async () => {
-    try {
-      const { data } = await supabase.from("app_meta").select("last_backup_at").eq("id", "default").single();
-      setLastBackupAt(data?.last_backup_at || null);
-    } catch (err) {
-      // No row yet (first time ever) - treated the same as "never backed up".
-    }
-  }, []);
 
   const recordBackup = async () => {
     const now = new Date().toISOString();
