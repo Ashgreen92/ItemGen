@@ -1405,10 +1405,91 @@ export default function Home() {
           };
         });
 
+      // Monthly Trends tab - the same monthly rollup logic already used on
+      // the Finances page, so the numbers here always match what's in-app.
+      const monthGroups = {};
+      allItems
+        .filter((item) => item.item_type !== "personal" && effectiveQuantitySold(item) > 0)
+        .forEach((item) => {
+          const dateStr = item.sold_at || item.created_at;
+          if (!dateStr) return;
+          const d = new Date(dateStr);
+          const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+          if (!monthGroups[key]) monthGroups[key] = { revenue: 0, cost: 0, units: 0 };
+          const qty = effectiveQuantitySold(item);
+          monthGroups[key].revenue += (Number(item.sale_price) || 0) * qty;
+          monthGroups[key].cost += (Number(item.cost_price) || 0) * qty;
+          monthGroups[key].units += qty;
+        });
+      const trendRows = Object.entries(monthGroups)
+        .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+        .map(([key, v]) => ({
+          Month: new Date(`${key}-01`).toLocaleDateString("en-GB", { month: "long", year: "numeric" }),
+          "Units sold": v.units,
+          "Revenue (£)": Math.round(v.revenue * 100) / 100,
+          "Cost (£)": Math.round(v.cost * 100) / 100,
+          "Profit (£)": Math.round((v.revenue - v.cost) * 100) / 100,
+        }));
+
       const XLSX = await import("xlsx");
+
+      // Auto-sizes columns based on the longest value (or header) in each -
+      // fixes the truncated-text problem from a plain default-width export.
+      const autoFitColumns = (rowsForSheet) => {
+        if (rowsForSheet.length === 0) return [];
+        const headers = Object.keys(rowsForSheet[0]);
+        return headers.map((h) => {
+          const longest = Math.max(h.length, ...rowsForSheet.map((r) => String(r[h] ?? "").length));
+          return { wch: Math.min(Math.max(longest + 2, 8), 45) };
+        });
+      };
+
+      // Applies a £ currency number format to specific columns by header
+      // name, so money reads as £12.50 instead of a bare 12.5.
+      const applyCurrencyFormat = (worksheet, rowsForSheet, currencyHeaders) => {
+        const headers = Object.keys(rowsForSheet[0] || {});
+        headers.forEach((h, colIdx) => {
+          if (!currencyHeaders.includes(h)) return;
+          const col = XLSX.utils.encode_col(colIdx);
+          rowsForSheet.forEach((_, rowIdx) => {
+            const cellRef = `${col}${rowIdx + 2}`; // +2: row 1 is the header
+            if (worksheet[cellRef] && typeof worksheet[cellRef].v === "number") {
+              worksheet[cellRef].z = "£#,##0.00";
+            }
+          });
+        });
+      };
+
+      const soldSheet = XLSX.utils.json_to_sheet(soldRows);
+      soldSheet["!cols"] = autoFitColumns(soldRows);
+      applyCurrencyFormat(soldSheet, soldRows, [
+        "Sale price per item (£)",
+        "Total revenue (£)",
+        "Cost per item (£)",
+        "Total cost (£)",
+        "Profit (£)",
+      ]);
+
+      const stockSheet = XLSX.utils.json_to_sheet(rows);
+      stockSheet["!cols"] = autoFitColumns(rows);
+      applyCurrencyFormat(stockSheet, rows, [
+        "Cost price (£)",
+        "Sale price (£)",
+        "Recommended price (£)",
+        "Price low (£)",
+        "Price high (£)",
+        "Vinted price low (£)",
+        "Vinted price high (£)",
+      ]);
+
+      const trendSheet = XLSX.utils.json_to_sheet(trendRows);
+      trendSheet["!cols"] = autoFitColumns(trendRows);
+      applyCurrencyFormat(trendSheet, trendRows, ["Revenue (£)", "Cost (£)", "Profit (£)"]);
+
       const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(soldRows), "Sold");
-      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(rows), "Stock");
+      XLSX.utils.book_append_sheet(workbook, soldSheet, "Sold");
+      XLSX.utils.book_append_sheet(workbook, trendSheet, "Trends");
+      XLSX.utils.book_append_sheet(workbook, stockSheet, "Stock");
       XLSX.writeFile(workbook, `itemgen-stock-${new Date().toISOString().slice(0, 10)}.xlsx`);
       await recordBackup();
     } catch (err) {
