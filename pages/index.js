@@ -992,6 +992,7 @@ export default function Home() {
   const [bundleFilterGender, setBundleFilterGender] = useState("all");
   const [bundleFilterGarment, setBundleFilterGarment] = useState("all");
   const [bundleFilterSize, setBundleFilterSize] = useState("all");
+  const [soldTypeFilter, setSoldTypeFilter] = useState("all");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [bargains, setBargains] = useState([]);
@@ -1713,7 +1714,7 @@ export default function Home() {
               onClick={() => setView("stock")}
               className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "stock" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
             >
-              Stock {items.length > 0 && `(${items.length})`}
+              Stock Locator {items.filter((e) => !(e.status === "sold" && e.posted_at)).length > 0 && `(${items.filter((e) => !(e.status === "sold" && e.posted_at)).length})`}
             </button>
             <button
               onClick={() => setView("pipeline")}
@@ -1792,7 +1793,7 @@ export default function Home() {
           {[
             { key: "dashboard", label: "Home" },
             { key: "capture", label: "Upload new" },
-            { key: "stock", label: `Stock${items.length > 0 ? ` (${items.length})` : ""}` },
+            { key: "stock", label: `Stock Locator${items.filter((e) => !(e.status === "sold" && e.posted_at)).length > 0 ? ` (${items.filter((e) => !(e.status === "sold" && e.posted_at)).length})` : ""}` },
             { key: "pipeline", label: "Item status" },
             { key: "bundles", label: "Bundles" },
             { key: "sold", label: "Sold" },
@@ -2196,14 +2197,17 @@ export default function Home() {
               if (e._category) categoryCounts[e._category] = (categoryCounts[e._category] || 0) + 1;
             });
 
-            const filtered =
-              pipelineFilter === "all" ? categorized : categorized.filter((e) => e._category === pipelineFilter);
+            const filtered = (pipelineFilter === "all" ? categorized : categorized.filter((e) => e._category === pipelineFilter)).filter(
+              (e) => batchFilter === "all" || e.batch === batchFilter
+            );
+
+            const batches = [...new Set(categorized.map((e) => e.batch).filter(Boolean))].sort();
 
             return (
               <>
                 <p className="font-serif text-2xl mb-5">Item Status</p>
 
-                <div className="flex flex-wrap gap-2 mb-5">
+                <div className="flex flex-wrap gap-2 mb-3">
                   <button
                     onClick={() => setPipelineFilter("all")}
                     className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold border-2 transition bg-[#8A6116] text-white ${
@@ -2228,6 +2232,30 @@ export default function Home() {
                     );
                   })}
                 </div>
+
+                {batches.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mb-5">
+                    <button
+                      onClick={() => setBatchFilter("all")}
+                      className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
+                        batchFilter === "all" ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
+                      }`}
+                    >
+                      All boxes
+                    </button>
+                    {batches.map((b) => (
+                      <button
+                        key={b}
+                        onClick={() => setBatchFilter(b)}
+                        className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
+                          batchFilter === b ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
+                        }`}
+                      >
+                        {b} ({categorized.filter((e) => e.batch === b).length})
+                      </button>
+                    ))}
+                  </div>
+                )}
 
                 <div className="flex flex-col gap-2">
                   {filtered.length === 0 ? (
@@ -2409,7 +2437,11 @@ export default function Home() {
           {(() => {
             const soldArchive = items
               .filter((e) => e.status === "sold" && e.posted_at)
+              .filter((e) => soldTypeFilter === "all" || (soldTypeFilter === "personal" ? e.item_type === "personal" : e.item_type !== "personal"))
               .sort((a, b) => new Date(b.sold_at || b.posted_at) - new Date(a.sold_at || a.posted_at));
+            const totalCount = items.filter((e) => e.status === "sold" && e.posted_at).length;
+            const resaleCount = items.filter((e) => e.status === "sold" && e.posted_at && e.item_type !== "personal").length;
+            const personalCount = items.filter((e) => e.status === "sold" && e.posted_at && e.item_type === "personal").length;
 
             return (
               <>
@@ -2418,8 +2450,37 @@ export default function Home() {
                   Everything sold and posted — a permanent record, photos cleared.
                 </p>
 
+                <div className="flex gap-2 mb-5">
+                  <button
+                    onClick={() => setSoldTypeFilter("all")}
+                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
+                      soldTypeFilter === "all" ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
+                    }`}
+                  >
+                    All ({totalCount})
+                  </button>
+                  <button
+                    onClick={() => setSoldTypeFilter("resale")}
+                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
+                      soldTypeFilter === "resale" ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
+                    }`}
+                  >
+                    Resale ({resaleCount})
+                  </button>
+                  <button
+                    onClick={() => setSoldTypeFilter("personal")}
+                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
+                      soldTypeFilter === "personal" ? `${CATEGORY_STYLES.vinted.solid} border-transparent` : `${CATEGORY_STYLES.vinted.tint} ${CATEGORY_STYLES.vinted.text}`
+                    }`}
+                  >
+                    Personal ({personalCount})
+                  </button>
+                </div>
+
                 {soldArchive.length === 0 ? (
-                  <p className="text-sm text-[#8A7F63] py-8 text-center">Nothing sold and posted yet.</p>
+                  <p className="text-sm text-[#8A7F63] py-8 text-center">
+                    {soldTypeFilter === "personal" ? "No personal sales recorded yet." : "Nothing sold and posted yet."}
+                  </p>
                 ) : (
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
                     {soldArchive.map((e) => (
@@ -2637,6 +2698,9 @@ export default function Home() {
 
       {view === "stock" && (
         <div className="flex-1 p-4 sm:p-8 max-w-6xl w-full mx-auto">
+          <p className="font-serif text-2xl mb-1">Stock Locator</p>
+          <p className="text-sm text-[#8A7F63] mb-4">Find anything, whatever its status — by name or by box.</p>
+
           <div className="flex bg-[#F7F3E8] rounded-sm p-0.5 border border-[#C9BFA3] mb-3 w-fit">
             <button
               onClick={() => setStockFilter("active")}
@@ -2685,7 +2749,7 @@ export default function Home() {
                       batchFilter === b ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
                     }`}
                   >
-                    {b} ({items.filter((i) => i.batch === b).length})
+                    {b} ({items.filter((i) => i.batch === b && i.status !== "sold").length})
                   </button>
                 ))}
               </div>
