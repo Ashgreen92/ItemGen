@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download, Settings as SettingsIcon, Menu } from "lucide-react";
+import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download, Settings as SettingsIcon, Menu, RotateCw } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
 const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra"];
@@ -149,6 +149,29 @@ function resizeDataUrl(dataUrl, maxWidth, quality) {
       resolve(canvas.toDataURL("image/jpeg", quality));
     };
     img.onerror = () => reject(new Error("Could not resize image"));
+    img.src = dataUrl;
+  });
+}
+
+// Manual 90-degree rotation, for photos auto-rotate had no EXIF data to work
+// with (anything captured before that feature existed, or missing EXIF
+// entirely). Always turns clockwise - press it up to three times to get all
+// the way around.
+function rotateDataUrl(dataUrl, quality = 0.9) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.height;
+      canvas.height = img.width;
+      const ctx = canvas.getContext("2d");
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate(Math.PI / 2);
+      ctx.drawImage(img, -img.width / 2, -img.height / 2);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = () => reject(new Error("Could not rotate image"));
     img.src = dataUrl;
   });
 }
@@ -780,12 +803,13 @@ function stockNumber(item) {
   return item?.id ? item.id.split("-")[0].toUpperCase() : "--------";
 }
 
-function DownloadablePhotos({ item, saveDirHandle, onChooseFolder }) {
+function DownloadablePhotos({ item, saveDirHandle, onChooseFolder, onRotate }) {
   const sku = stockNumber(item);
   const titleSlug = (item.title || "item").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [heroIndex, setHeroIndex] = useState(0);
+  const [rotating, setRotating] = useState(false);
   const supportsFolderSave = typeof window !== "undefined" && "showDirectoryPicker" in window;
   const photos = item.photos || [];
 
@@ -850,6 +874,23 @@ function DownloadablePhotos({ item, saveDirHandle, onChooseFolder }) {
       {photos.length > 0 && (
         <div className="relative w-full aspect-square rounded-sm border border-[#C9BFA3] mb-2 overflow-hidden">
           <img src={photos[heroIndex]} alt="" className="w-full h-full object-cover" />
+          {onRotate && (
+            <button
+              onClick={async () => {
+                setRotating(true);
+                try {
+                  await onRotate(item, heroIndex);
+                } finally {
+                  setRotating(false);
+                }
+              }}
+              disabled={rotating}
+              title="Rotate 90°"
+              className="absolute right-2 top-2 w-9 h-9 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center disabled:opacity-50"
+            >
+              {rotating ? <Loader2 size={16} className="animate-spin" /> : <RotateCw size={16} />}
+            </button>
+          )}
           {photos.length > 1 && (
             <>
               <button
@@ -1013,6 +1054,43 @@ export default function Home() {
       if (err.name !== "AbortError") console.error("Folder pick failed:", err);
     }
   };
+
+  // Rotates one photo 90deg clockwise and re-uploads it to the SAME Storage
+  // path (upsert), so nothing else about the item needs to change - just
+  // cache-busts the URL so the browser actually fetches the new bytes
+  // instead of showing a stale cached copy at the same address. If it's the
+  // first photo, the thumbnail (used everywhere in list views) gets rotated
+  // too, so it doesn't fall out of sync with the photo it was made from.
+  const rotatePhoto = async (item, photoIndex) => {
+    try {
+      const currentUrl = item.photos[photoIndex];
+      const dataUrl = await urlToDataUrl(currentUrl);
+      const rotated = await rotateDataUrl(dataUrl);
+      const path = `${item.id}/${photoIndex}.jpg`;
+      const newUrl = await uploadPhotoToStorage(rotated, path);
+      const bustedUrl = `${newUrl}?t=${Date.now()}`;
+
+      const newPhotos = [...item.photos];
+      newPhotos[photoIndex] = bustedUrl;
+      const updates = { photos: newPhotos };
+
+      if (photoIndex === 0 && item.thumbnail) {
+        const smallRotated = await resizeDataUrl(rotated, 600, 0.65);
+        const thumbUrl = await uploadPhotoToStorage(smallRotated, `${item.id}/thumb.jpg`);
+        updates.thumbnail = `${thumbUrl}?t=${Date.now()}`;
+      }
+
+      await supabase.from("items").update(updates).eq("id", item.id);
+      const updated = { ...item, ...updates };
+      setSelectedItem(updated);
+      setEditDraft((d) => (d ? { ...d, ...updates } : d));
+      fetchItems();
+    } catch (err) {
+      console.error("Rotate failed:", err);
+      alert("Couldn't rotate that photo: " + (err.message || err));
+    }
+  };
+
   const [editDraft, setEditDraft] = useState(null);
   const [editing, setEditing] = useState(false);
   const pollRef = useRef(null);
@@ -2802,7 +2880,7 @@ export default function Home() {
           </div>
 
           <div className="flex-1 overflow-y-auto p-4 sm:p-8 max-w-2xl w-full mx-auto">
-            <DownloadablePhotos item={selectedItem} saveDirHandle={saveDirHandle} onChooseFolder={chooseSaveFolder} />
+            <DownloadablePhotos item={selectedItem} saveDirHandle={saveDirHandle} onChooseFolder={chooseSaveFolder} onRotate={rotatePhoto} />
 
             {selectedItem.status === "ready" && (
               <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-3 mb-5">
