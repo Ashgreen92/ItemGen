@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download, Settings as SettingsIcon, Menu, RotateCw } from "lucide-react";
+import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download, Settings as SettingsIcon, Menu, RotateCw, RotateCcw } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
 const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra"];
@@ -155,9 +155,8 @@ function resizeDataUrl(dataUrl, maxWidth, quality) {
 
 // Manual 90-degree rotation, for photos auto-rotate had no EXIF data to work
 // with (anything captured before that feature existed, or missing EXIF
-// entirely). Always turns clockwise - press it up to three times to get all
-// the way around.
-function rotateDataUrl(dataUrl, quality = 0.9) {
+// entirely). direction is "cw" or "ccw".
+function rotateDataUrl(dataUrl, direction = "cw", quality = 0.9) {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = "anonymous";
@@ -167,7 +166,7 @@ function rotateDataUrl(dataUrl, quality = 0.9) {
       canvas.height = img.width;
       const ctx = canvas.getContext("2d");
       ctx.translate(canvas.width / 2, canvas.height / 2);
-      ctx.rotate(Math.PI / 2);
+      ctx.rotate((direction === "ccw" ? -1 : 1) * (Math.PI / 2));
       ctx.drawImage(img, -img.width / 2, -img.height / 2);
       resolve(canvas.toDataURL("image/jpeg", quality));
     };
@@ -875,21 +874,38 @@ function DownloadablePhotos({ item, saveDirHandle, onChooseFolder, onRotate }) {
         <div className="relative w-full aspect-square rounded-sm border border-[#C9BFA3] mb-2 overflow-hidden">
           <img src={photos[heroIndex]} alt="" className="w-full h-full object-cover" />
           {onRotate && (
-            <button
-              onClick={async () => {
-                setRotating(true);
-                try {
-                  await onRotate(item, heroIndex);
-                } finally {
-                  setRotating(false);
-                }
-              }}
-              disabled={rotating}
-              title="Rotate 90°"
-              className="absolute right-2 top-2 w-9 h-9 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center disabled:opacity-50"
-            >
-              {rotating ? <Loader2 size={16} className="animate-spin" /> : <RotateCw size={16} />}
-            </button>
+            <div className="absolute right-2 top-2 flex gap-1.5">
+              <button
+                onClick={async () => {
+                  setRotating(true);
+                  try {
+                    await onRotate(item, heroIndex, "ccw");
+                  } finally {
+                    setRotating(false);
+                  }
+                }}
+                disabled={rotating}
+                title="Rotate 90° left"
+                className="w-9 h-9 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center disabled:opacity-50"
+              >
+                {rotating ? <Loader2 size={16} className="animate-spin" /> : <RotateCcw size={16} />}
+              </button>
+              <button
+                onClick={async () => {
+                  setRotating(true);
+                  try {
+                    await onRotate(item, heroIndex, "cw");
+                  } finally {
+                    setRotating(false);
+                  }
+                }}
+                disabled={rotating}
+                title="Rotate 90° right"
+                className="w-9 h-9 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center disabled:opacity-50"
+              >
+                {rotating ? <Loader2 size={16} className="animate-spin" /> : <RotateCw size={16} />}
+              </button>
+            </div>
           )}
           {photos.length > 1 && (
             <>
@@ -1061,11 +1077,11 @@ export default function Home() {
   // instead of showing a stale cached copy at the same address. If it's the
   // first photo, the thumbnail (used everywhere in list views) gets rotated
   // too, so it doesn't fall out of sync with the photo it was made from.
-  const rotatePhoto = async (item, photoIndex) => {
+  const rotatePhoto = async (item, photoIndex, direction = "cw") => {
     try {
       const currentUrl = item.photos[photoIndex];
       const dataUrl = await urlToDataUrl(currentUrl);
-      const rotated = await rotateDataUrl(dataUrl);
+      const rotated = await rotateDataUrl(dataUrl, direction);
       const path = `${item.id}/${photoIndex}.jpg`;
       const newUrl = await uploadPhotoToStorage(rotated, path);
       const bustedUrl = `${newUrl}?t=${Date.now()}`;
