@@ -193,14 +193,24 @@ function autoEnhance(dataUrl) {
           const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
           const data = imageData.data;
 
-          // Simple uniform brightness lift - every pixel scaled by the same
-          // amount. No colour-channel white balance, no contrast/levels
-          // stretching - both distorted how items looked (yellow tints,
-          // blotchy fading). A flat multiply can't do that: it can't shift
-          // hue, and it can't unevenly redistribute tones, so a light sheet
-          // gets whiter while a dark item just stays the same dark item,
-          // marginally brighter.
-          const brightnessBoost = 1.12;
+          // Sample the photo to find its actual average brightness first - a
+          // flat boost applied to every photo regardless over-brightened
+          // already well-lit shots into clipping, and clipping DOES distort
+          // colour (a pink jumper pushed toward beige) even though a flat
+          // multiply can't shift hue when nothing's clipping.
+          let sum = 0, sampled = 0;
+          for (let i = 0; i < data.length; i += 40) { // every ~10th pixel, for speed
+            sum += (data[i] + data[i + 1] + data[i + 2]) / 3;
+            sampled++;
+          }
+          const meanBrightness = sampled > 0 ? sum / sampled : 128;
+
+          // Only genuinely dim photos get the full boost - well-lit ones get
+          // little or none, so they're never pushed into clipping/washed-out
+          // territory. Never darkens an already-bright shot, only tapers off
+          // how much brightening happens as the photo gets brighter.
+          const targetMean = 150;
+          const brightnessBoost = Math.min(1.12, Math.max(1.0, targetMean / meanBrightness));
           for (let i = 0; i < data.length; i += 4) {
             data[i] = Math.min(255, data[i] * brightnessBoost);
             data[i + 1] = Math.min(255, data[i + 1] * brightnessBoost);
@@ -208,7 +218,7 @@ function autoEnhance(dataUrl) {
           }
 
           ctx.putImageData(imageData, 0, 0);
-          resolve({ url: canvas.toDataURL("image/jpeg", 0.85), enhanced: true });
+          resolve({ url: canvas.toDataURL("image/jpeg", 0.85), enhanced: brightnessBoost > 1.01 });
         } catch (err) {
           console.error("Photo enhancement failed, using original:", err);
           resolve({ url: dataUrl, enhanced: false });
