@@ -53,7 +53,13 @@ function getExifOrientation(file) {
         if (view.getUint16(0, false) !== 0xffd8) return resolve(1); // not a JPEG
         let offset = 2;
         const length = view.byteLength;
-        while (offset < length) {
+        let iterations = 0;
+        // Hard cap - a real JPEG never has anywhere near this many segments
+        // before EXIF (if present at all). Guards against a malformed
+        // segment reporting a length that never advances offset, which
+        // would otherwise spin this loop forever with no error to catch.
+        while (offset < length && iterations < 200) {
+          iterations++;
           const marker = view.getUint16(offset, false);
           offset += 2;
           if (marker === 0xffe1) {
@@ -73,7 +79,9 @@ function getExifOrientation(file) {
           } else if ((marker & 0xff00) !== 0xff00) {
             break;
           } else {
-            offset += view.getUint16(offset, false);
+            const segmentLength = view.getUint16(offset, false);
+            if (segmentLength < 2) break; // degenerate segment - can't safely advance, bail out
+            offset += segmentLength;
           }
         }
         resolve(1);
