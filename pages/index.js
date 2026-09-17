@@ -805,7 +805,8 @@ function ListingHelper({ item }) {
   return (
     <div className="mb-5">
       <div className="flex flex-col gap-2">
-        <CopyField label="Title" value={item.title} charLimit={80} />
+        <CopyField label="eBay Title" value={item.title} charLimit={80} />
+        <CopyField label="Vinted Title" value={item.vinted_title} />
         <CopyField label="Starting price (consider allowing offers up to the high end)" value={priceLabel} />
         {item.size_applicable && <CopyField label="Size" value={item.size} />}
         <CopyField label="Category" value={item.category} />
@@ -1272,6 +1273,7 @@ export default function Home() {
         .from("items")
         .update({
           title: result.title || "Untitled item",
+          vinted_title: result.vintedTitle || null,
           description: result.description || "",
           category: result.category || "",
           condition: result.condition || "",
@@ -1421,6 +1423,7 @@ export default function Home() {
       .from("items")
       .update({
         title: editDraft.title,
+        vinted_title: editDraft.vinted_title,
         description: editDraft.description,
         category: editDraft.category,
         condition: editDraft.condition,
@@ -1530,6 +1533,7 @@ export default function Home() {
         Batch: item.batch || "",
         "Captured date": item.created_at ? item.created_at.slice(0, 10) : "",
         Title: item.title || "",
+        "Vinted Title": item.vinted_title || "",
         Status: item.status || "",
         "Cost price (£)": item.cost_price ?? "",
         "Sale price (£)": item.sale_price ?? "",
@@ -3293,10 +3297,19 @@ export default function Home() {
                 ) : (
                   <div className="flex flex-col gap-4 mb-4 border-t border-[#C9BFA3] pt-4">
                     <div>
-                      <label className="text-xs text-[#8A7F63] mb-1 block">Title</label>
+                      <label className="text-xs text-[#8A7F63] mb-1 block">eBay Title</label>
                       <input
                         value={editDraft.title || ""}
                         onChange={(e) => setEditDraft({ ...editDraft, title: e.target.value })}
+                        className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-xs text-[#8A7F63] mb-1 block">Vinted Title</label>
+                      <input
+                        value={editDraft.vinted_title || ""}
+                        onChange={(e) => setEditDraft({ ...editDraft, vinted_title: e.target.value })}
                         className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
                       />
                     </div>
