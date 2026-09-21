@@ -236,14 +236,30 @@ export default async function handler(req, res) {
   }
 
   try {
-    const imageBlocks = photos.map((dataUrl) => ({
-      type: "image",
-      source: {
-        type: "base64",
-        media_type: "image/jpeg",
-        data: dataUrl.split(",")[1],
-      },
-    }));
+    // Photos arrive as either a real http(s) Storage URL (the normal case -
+    // see uploadPhotoToStorage in index.js) or, for older unmigrated items,
+    // a raw base64 data URL. URLs are handed to Anthropic as a "url" image
+    // source, so Anthropic's own servers fetch the full-resolution original
+    // straight from Storage - the photo bytes never have to travel through
+    // this request body at all, which is what actually keeps this route
+    // clear of Vercel's hard 4.5MB serverless request-body limit. Only the
+    // rare legacy base64 photo still needs to be embedded inline.
+    const imageBlocks = photos.map((p) => {
+      if (typeof p === "string" && p.startsWith("data:")) {
+        return {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: "image/jpeg",
+            data: p.split(",")[1],
+          },
+        };
+      }
+      return {
+        type: "image",
+        source: { type: "url", url: p },
+      };
+    });
 
     const isQuick = mode === "quick";
 
@@ -260,8 +276,23 @@ export default async function handler(req, res) {
     const promptText = isQuick ? QUICK_PROMPT : buildFullPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings);
 
     const body = {
-      model: isQuick ? "claude-haiku-4-5-20251001" : "claude-sonnet-5",
-      max_tokens: isQuick ? 300 : 4000,
+      // Quick pass used to run on Haiku to keep it cheap, but that's what was
+      // causing wrong (not just missing) sizes - e.g. reading "36A" off a
+      // label as "36B", a fine-print misread Haiku is meaningfully more prone
+      // to than Sonnet. A wrong size slips straight through (the app only
+      // blocks on a MISSING size, not a wrong one) and ships in the listing,
+      // which is worse than the item just needing a manual size entry. Sizes
+      // must auto-fill correctly with no manual confirm step, so accuracy
+      // beats the small cost saving here - both passes run on Sonnet now.
+      model: "claude-sonnet-5",
+      // Raised from 4000 - with two titles plus everything else now asked
+      // for, a response that ran long (more eBay comparables to score, a
+      // longer notes field, a bigger verify_before_listing list) could hit
+      // the old ceiling and get cut off mid-JSON with no closing brace,
+      // which is what the "No JSON found in AI response" error actually
+      // was (see the stop_reason check below for a clearer message on this
+      // specific failure going forward).
+      max_tokens: isQuick ? 300 : 6000,
       messages: [
         {
           role: "user",
@@ -298,6 +329,17 @@ export default async function handler(req, res) {
     }
 
     const data = await response.json();
+    // If the model ran out of output budget before finishing, the response
+    // gets cut off mid-JSON (no closing brace) and extractJson below would
+    // otherwise throw the generic, confusing "No JSON found" error. Catch
+    // this specific case here with a clearer message instead.
+    if (data.stop_reason === "max_tokens") {
+      console.error("Anthropic response hit max_tokens before finishing:", JSON.stringify(data).slice(0, 500));
+      return res.status(502).json({
+        error:
+          "The AI's response got cut off before it finished (ran out of output budget) - this usually clears up on Retry. If it keeps happening on this item, let me know.",
+      });
+    }
     const text = (data.content || [])
       .map((b) => b.text || "")
       .join("\n")
