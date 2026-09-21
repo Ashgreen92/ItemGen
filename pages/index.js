@@ -38,64 +38,16 @@ async function urlToDataUrl(url) {
 
 // ---------- image helpers ----------
 
-// Reads the JPEG's EXIF orientation tag directly from the raw file bytes.
-// Phones store rotation as an instruction alongside the photo rather than
-// rotating the actual pixels - canvas.toDataURL() strips that instruction
-// entirely, so this has to be read from the original file, before the very
-// first canvas draw, or the rotation hint is lost for good. Only reads the
-// first 128KB since EXIF data always sits near the start of a JPEG.
-function getExifOrientation(file) {
-  return new Promise((resolve) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const view = new DataView(e.target.result);
-        if (view.getUint16(0, false) !== 0xffd8) return resolve(1); // not a JPEG
-        let offset = 2;
-        const length = view.byteLength;
-        let iterations = 0;
-        // Hard cap - a real JPEG never has anywhere near this many segments
-        // before EXIF (if present at all). Guards against a malformed
-        // segment reporting a length that never advances offset, which
-        // would otherwise spin this loop forever with no error to catch.
-        while (offset < length && iterations < 200) {
-          iterations++;
-          const marker = view.getUint16(offset, false);
-          offset += 2;
-          if (marker === 0xffe1) {
-            if (view.getUint32(offset + 2, false) !== 0x45786966) return resolve(1); // "Exif"
-            const tiffOffset = offset + 8;
-            const little = view.getUint16(tiffOffset, false) === 0x4949;
-            const firstIfdOffset = view.getUint32(tiffOffset + 4, little);
-            const dirOffset = tiffOffset + firstIfdOffset;
-            const entries = view.getUint16(dirOffset, little);
-            for (let i = 0; i < entries; i++) {
-              const entryOffset = dirOffset + 2 + i * 12;
-              if (view.getUint16(entryOffset, little) === 0x0112) {
-                return resolve(view.getUint16(entryOffset + 8, little));
-              }
-            }
-            return resolve(1);
-          } else if ((marker & 0xff00) !== 0xff00) {
-            break;
-          } else {
-            const segmentLength = view.getUint16(offset, false);
-            if (segmentLength < 2) break; // degenerate segment - can't safely advance, bail out
-            offset += segmentLength;
-          }
-        }
-        resolve(1);
-      } catch (err) {
-        resolve(1); // fail safe - treat as already correctly oriented rather than break capture
-      }
-    };
-    reader.onerror = () => resolve(1);
-    reader.readAsArrayBuffer(file.slice(0, 131072));
-  });
-}
-
+// This used to read the JPEG's EXIF orientation tag and manually rotate the
+// canvas to match, because canvas.toDataURL() historically stripped that
+// orientation instruction. Modern mobile browsers (Safari and Chrome on the
+// phones this app actually runs on) now apply EXIF orientation themselves
+// when decoding a photo into an <img>, so img.width/img.height and whatever
+// drawImage() paints below are already right-way-up. Rotating again on top
+// of that was a DOUBLE rotation - which is exactly why every photo was
+// consistently coming out needing the same manual correction. Trusting the
+// browser's own orientation handling and just resizing/compressing fixes it.
 async function compressImage(file, maxWidth, quality) {
-  const orientation = await getExifOrientation(file);
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -106,28 +58,10 @@ async function compressImage(file, maxWidth, quality) {
           drawH = Math.round(drawH * (maxWidth / drawW));
           drawW = maxWidth;
         }
-        // Orientations 5-8 involve a 90-degree turn, so the canvas itself
-        // needs its width/height swapped to hold the rotated result.
-        const swapDims = orientation >= 5 && orientation <= 8;
         const canvas = document.createElement("canvas");
-        canvas.width = swapDims ? drawH : drawW;
-        canvas.height = swapDims ? drawW : drawH;
+        canvas.width = drawW;
+        canvas.height = drawH;
         const ctx = canvas.getContext("2d");
-
-        // Standard EXIF-orientation-to-canvas-transform mapping - rotates/
-        // flips the drawing context to match what the phone recorded, so
-        // the actual pixels come out right-way-up in the saved file.
-        switch (orientation) {
-          case 2: ctx.transform(-1, 0, 0, 1, drawW, 0); break;
-          case 3: ctx.transform(-1, 0, 0, -1, drawW, drawH); break;
-          case 4: ctx.transform(1, 0, 0, -1, 0, drawH); break;
-          case 5: ctx.transform(0, 1, 1, 0, 0, 0); break;
-          case 6: ctx.transform(0, 1, -1, 0, drawH, 0); break;
-          case 7: ctx.transform(0, -1, -1, 0, drawH, drawW); break;
-          case 8: ctx.transform(0, -1, 1, 0, 0, drawW); break;
-          default: break; // 1, or unknown - no rotation needed
-        }
-
         ctx.drawImage(img, 0, 0, drawW, drawH);
         resolve(canvas.toDataURL("image/jpeg", quality));
       };
@@ -246,26 +180,51 @@ function estimateBytes(dataUrl) {
   return dataUrl.length;
 }
 
+// Photos are almost always public Supabase Storage URLs by this point (see
+// uploadPhotoToStorage) - analyze.js now hands those straight to Anthropic
+// as URL image sources, so Anthropic's own servers fetch the full-res
+// original directly from Storage. This function used to defeat that by
+// re-fetching every photo here, converting it back to base64, and - if the
+// combined batch exceeded a few MB - aggressively downscaling everything to
+// as little as 250px wide at 25% quality just so the whole thing could be
+// crammed into the POST body under Vercel's hard 4.5MB request-body limit.
+// That was very likely why genuinely-legible sizes on label photos were
+// coming back blank - the AI was seeing a much softer image than what was
+// actually captured. Storage URLs now pass through completely untouched.
+// The only photos that still need to travel inside the request body (and
+// so still need this compression) are legacy raw base64 data URLs from
+// items captured before the Storage migration.
 async function ensureUnderSizeLimit(photos, maxTotalBytes = 3200000) {
-  let current = await Promise.all(photos.map(urlToDataUrl));
+  const legacyIndices = [];
+  photos.forEach((p, i) => {
+    if (typeof p === "string" && p.startsWith("data:")) legacyIndices.push(i);
+  });
+  if (legacyIndices.length === 0) return photos;
+
+  let legacyPhotos = legacyIndices.map((i) => photos[i]);
   let quality = 0.5;
   let width = 700;
   for (let attempt = 0; attempt < 7; attempt++) {
-    const totalBytes = current.reduce((sum, p) => sum + estimateBytes(p), 0);
-    if (totalBytes <= maxTotalBytes) return current;
-    current = await Promise.all(
-      current.map((p) => resizeDataUrl(p, width, quality))
+    const totalBytes = legacyPhotos.reduce((sum, p) => sum + estimateBytes(p), 0);
+    if (totalBytes <= maxTotalBytes) break;
+    legacyPhotos = await Promise.all(
+      legacyPhotos.map((p) => resizeDataUrl(p, width, quality))
     );
     quality = Math.max(0.25, quality - 0.05);
     width = Math.max(250, Math.round(width * 0.8));
   }
-  const finalBytes = current.reduce((sum, p) => sum + estimateBytes(p), 0);
+  const finalBytes = legacyPhotos.reduce((sum, p) => sum + estimateBytes(p), 0);
   if (finalBytes > maxTotalBytes) {
     throw new Error(
-      `Photos still ${(finalBytes / 1000000).toFixed(1)}MB after compression (${current.length} photos, limit ${(maxTotalBytes / 1000000).toFixed(1)}MB)`
+      `Photos still ${(finalBytes / 1000000).toFixed(1)}MB after compression (${legacyPhotos.length} photos, limit ${(maxTotalBytes / 1000000).toFixed(1)}MB)`
     );
   }
-  return current;
+
+  const result = [...photos];
+  legacyIndices.forEach((origIdx, j) => {
+    result[origIdx] = legacyPhotos[j];
+  });
+  return result;
 }
 
 async function analyzeItem(photos, mode, confirmedFields, ebaySearchQuery) {
@@ -345,12 +304,14 @@ const CATEGORY_STYLES = {
 // judged purely on the eBay/Vinted booleans (Depop still shown as a small
 // chip elsewhere but doesn't get its own main colour yet). Sold items go
 // straight to "ready for posting" the moment they're marked sold - no
-// separate payment-due gate - until the posted step is confirmed.
+// separate payment-due gate - until the posted step is confirmed. A partial
+// sale on a quantity>1 item (status still "ready", one unit sold and
+// unposted while the rest stays listed) gets the same "ready for posting"
+// treatment, checked first so it isn't missed just because the item as a
+// whole isn't fully sold out yet.
 function getListingCategory(item) {
-  if (item.status === "sold") {
-    if (!item.posted_at) return "ready_for_posting";
-    return "sold";
-  }
+  if (needsPosting(item)) return "ready_for_posting";
+  if (item.status === "sold") return "sold";
   if (item.status !== "ready") return null;
   const onEbay = !!item.ebay_listed;
   const onVinted = !!item.vinted_listed;
@@ -457,6 +418,18 @@ function effectiveQuantitySold(item) {
   if (qs > 0) return qs;
   if (item.status === "sold") return Number(item.quantity) || 1;
   return 0;
+}
+
+// True whenever there's a sale sitting unposted - whether that's the last
+// unit (status flips to "sold") or one unit out of a multi-quantity stock
+// entry (status stays "ready" because the rest is still for sale). Compares
+// the two timestamps directly rather than trusting status alone, so a
+// partial sale on a quantity>1 item still surfaces as "needs posting"
+// instead of silently looking like ordinary unsold stock.
+function needsPosting(item) {
+  if (!item.sold_at) return false;
+  if (!item.posted_at) return true;
+  return new Date(item.sold_at) > new Date(item.posted_at);
 }
 
 function ListedToggles({ item, onToggle }) {
@@ -606,13 +579,15 @@ function isStaleListing(item) {
 }
 
 // Post-sale lifecycle: ready for posting -> fully done. Turns red after 2
-// days unposted, timed from when the item was actually marked sold.
+// days unposted, timed from when the item was actually marked sold. Fires
+// for a partial sale too (status still "ready") via needsPosting, not just
+// once the whole quantity is sold out.
 function getSoldInfo(item) {
-  if (item.status !== "sold") return null;
-  if (!item.posted_at) {
+  if (needsPosting(item)) {
     const days = daysSince(item.sold_at) ?? 0;
     return { stage: "ready_for_posting", flag: days >= 2 ? "red" : "orange", label: "Ready for posting", days };
   }
+  if (item.status !== "sold") return null;
   return { stage: "posted", flag: "none", label: "Sold", days: null };
 }
 
@@ -1003,18 +978,41 @@ function DownloadablePhotos({ item, saveDirHandle, onChooseFolder, onRotate }) {
     </div>
   );
 }
-function PasscodeGate({ onUnlock }) {
-  const [value, setValue] = useState("");
-  const [error, setError] = useState(false);
-  const expected = process.env.NEXT_PUBLIC_APP_PASSCODE;
+// Replaces the old single-shared-passcode gate with real per-person sign-in,
+// so two people (e.g. you and your mum) can each have their own private
+// stock in the same app instead of everyone sharing one passcode and one
+// pool of items. Supabase Auth handles the account/session itself; the
+// items/photos side of the privacy split lives in the RLS policies and the
+// user_id-prefixed storage paths, not here.
+function AuthGate() {
+  const [mode, setMode] = useState("signin"); // "signin" | "signup"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+  const [busy, setBusy] = useState(false);
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
-    if (!expected || value === expected) {
-      localStorage.setItem("snapstock-unlocked", "1");
-      onUnlock();
-    } else {
-      setError(true);
+    setError("");
+    setInfo("");
+    setBusy(true);
+    try {
+      if (mode === "signin") {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        // No further action needed here - the onAuthStateChange listener in
+        // Home() picks up the new session and unlocks the app itself.
+      } else {
+        const { error } = await supabase.auth.signUp({ email, password });
+        if (error) throw error;
+        setInfo("Account created. Check your email to confirm it, then sign in.");
+        setMode("signin");
+      }
+    } catch (err) {
+      setError(err.message || "Something went wrong");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -1028,19 +1026,44 @@ function PasscodeGate({ onUnlock }) {
           <span className="font-serif text-lg">ItemGen</span>
         </div>
         <input
-          type="password"
-          value={value}
+          type="email"
+          value={email}
           onChange={(e) => {
-            setValue(e.target.value);
-            setError(false);
+            setEmail(e.target.value);
+            setError("");
           }}
-          placeholder="Enter passcode"
+          placeholder="Email"
           className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2.5 text-center"
           autoFocus
+          required
         />
-        {error && <p className="text-[#A63A2E] text-sm text-center">Wrong passcode</p>}
-        <button type="submit" className="w-full py-2.5 rounded-sm bg-[#A9822E] text-[#2B2620] font-bold">
-          Unlock
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => {
+            setPassword(e.target.value);
+            setError("");
+          }}
+          placeholder="Password"
+          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2.5 text-center"
+          required
+          minLength={6}
+        />
+        {error && <p className="text-[#A63A2E] text-sm text-center">{error}</p>}
+        {info && <p className="text-[#3F5E42] text-sm text-center">{info}</p>}
+        <button type="submit" disabled={busy} className="w-full py-2.5 rounded-sm bg-[#A9822E] text-[#2B2620] font-bold disabled:opacity-50">
+          {busy ? "…" : mode === "signin" ? "Sign in" : "Create account"}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setMode((m) => (m === "signin" ? "signup" : "signin"));
+            setError("");
+            setInfo("");
+          }}
+          className="text-xs text-[#6B6250] text-center underline"
+        >
+          {mode === "signin" ? "New here? Create an account" : "Already have an account? Sign in"}
         </button>
       </form>
     </div>
@@ -1050,8 +1073,10 @@ function PasscodeGate({ onUnlock }) {
 // ---------- main app ----------
 
 export default function Home() {
-  const [unlocked, setUnlocked] = useState(!process.env.NEXT_PUBLIC_APP_PASSCODE);
+  const [unlocked, setUnlocked] = useState(false);
   const [checkedLock, setCheckedLock] = useState(false);
+  const [session, setSession] = useState(null);
+  const userId = session?.user?.id || null;
 
   const [view, setView] = useState("dashboard");
   const [items, setItems] = useState([]);
@@ -1130,14 +1155,32 @@ export default function Home() {
   const [editing, setEditing] = useState(false);
   const pollRef = useRef(null);
 
+  // Real per-person sign-in via Supabase Auth, replacing the old shared
+  // passcode. getSession() picks up an already-logged-in browser on load;
+  // onAuthStateChange keeps session/unlocked in sync after that (sign in,
+  // sign out, token refresh) without needing to reload the page.
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      if (!process.env.NEXT_PUBLIC_APP_PASSCODE || localStorage.getItem("snapstock-unlocked") === "1") {
-        setUnlocked(true);
-      }
+    let active = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!active) return;
+      setSession(data.session || null);
+      setUnlocked(!!data.session);
       setCheckedLock(true);
-    }
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+      setUnlocked(!!newSession);
+    });
+    return () => {
+      active = false;
+      listener.subscription.unsubscribe();
+    };
   }, []);
+
+  const signOut = async () => {
+    await supabase.auth.signOut();
+    setSettingsOpen(false);
+  };
 
   const fetchItems = useCallback(async () => {
     const leanColumns =
@@ -1688,10 +1731,10 @@ export default function Home() {
     setSoldFormFor(item);
     setSoldPriceInput(item.recommended_price != null ? String(item.recommended_price) : item.price_low != null ? String(item.price_low) : "");
     setCostPriceInput(item.cost_price != null ? String(item.cost_price) : "");
-    // Default to selling every remaining unit - matches "last item sold we
-    // had 2 sold" being the common case; partial sales are the exception.
-    const remaining = (item.quantity || 1) - (item.quantity_sold || 0);
-    setSoldQtyInput(String(Math.max(1, remaining)));
+    // Default to 1, not the full remaining count - defaulting to "sell
+    // everything left" was too easy to confirm by accident and silently
+    // over-report quantity sold when really only one unit had gone.
+    setSoldQtyInput("1");
     // Guess the platform only when it's unambiguous - listed on exactly one
     // of eBay/Vinted/Depop. Otherwise leave it blank and make you choose.
     const listedOn = [item.ebay_listed && "eBay", item.vinted_listed && "Vinted", item.depop_listed && "Depop"].filter(Boolean);
@@ -1727,9 +1770,12 @@ export default function Home() {
   const unmarkSold = async (item) => {
     // Full undo - resets quantity_sold back to 0, since individual sale
     // events aren't tracked separately (only the running total is kept).
-    await supabase.from("items").update({ status: "ready", quantity_sold: 0 }).eq("id", item.id);
-    setSelectedItem({ ...item, status: "ready", quantity_sold: 0 });
-    setEditDraft((d) => (d ? { ...d, status: "ready", quantity_sold: 0 } : d));
+    // sold_at is cleared too, otherwise needsPosting() would keep flagging
+    // this item as "needs posting" even though the sale was just undone.
+    const updates = { status: "ready", quantity_sold: 0, sold_at: null };
+    await supabase.from("items").update(updates).eq("id", item.id);
+    setSelectedItem({ ...item, ...updates });
+    setEditDraft((d) => (d ? { ...d, ...updates } : d));
     fetchItems();
   };
 
@@ -1758,8 +1804,19 @@ export default function Home() {
   // kept as a permanent visual record - deliberately small and re-compressed,
   // so there's no full-size original left to recover. Everything else needed
   // to look back on the sale (price, cost, dates, title, category, size) stays.
+  //
+  // That archiving only makes sense once the item is fully sold out
+  // (status "sold") - if this is a partial sale on a quantity>1 item, the
+  // remaining stock is still listed and still needs its photos, so posting
+  // just clears the "needs posting" flag (posted_at) without touching them.
   const confirmPosted = async (item) => {
     const now = new Date().toISOString();
+    if (item.status !== "sold") {
+      await supabase.from("items").update({ posted_at: now }).eq("id", item.id);
+      setSelectedItem({ ...item, posted_at: now });
+      fetchItems();
+      return;
+    }
     let shrunkDataUrl = null;
     try {
       if (item.thumbnail) shrunkDataUrl = await resizeDataUrl(item.thumbnail, 120, 0.5);
@@ -1800,7 +1857,7 @@ export default function Home() {
   };
 
   if (!checkedLock) return null;
-  if (!unlocked) return <PasscodeGate onUnlock={() => setUnlocked(true)} />;
+  if (!unlocked) return <AuthGate />;
 
   return (
     <div className="min-h-screen bg-[#EDE6D6] text-[#2B2620] flex flex-col relative">
@@ -1876,6 +1933,11 @@ export default function Home() {
             </button>
             {settingsOpen && (
               <div className="absolute right-0 mt-1 w-64 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm shadow-lg z-20 p-1">
+                {session?.user?.email && (
+                  <div className="px-3 py-2 text-xs text-[#8A7F63] border-b border-[#C9BFA3] mb-1 truncate">
+                    Signed in as {session.user.email}
+                  </div>
+                )}
                 <button
                   onClick={() => {
                     setSettingsOpen(false);
@@ -1897,6 +1959,12 @@ export default function Home() {
                 >
                   {exportingExcel ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
                   {exportingExcel ? "Preparing spreadsheet…" : "Export stock as Excel"}
+                </button>
+                <button
+                  onClick={signOut}
+                  className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#A63A2E] hover:bg-[#DCD4BC] flex items-center gap-2 mt-1 border-t border-[#C9BFA3] pt-2"
+                >
+                  Sign out
                 </button>
               </div>
             )}
@@ -1938,10 +2006,13 @@ export default function Home() {
             const activeItems = items.filter((e) => e.status !== "sold");
             // Needs Attention covers everything that's genuinely stuck:
             // needs_size/error block a listing from happening at all,
-            // ready_for_posting is a sold item waiting on you, stale catches
-            // stock that's been listed 30+ days without selling anywhere, and
-            // add_to_vinted catches something listed on eBay 7+ days that
-            // hasn't been added to Vinted yet.
+            // ready_for_posting is a sale waiting on you to post it -
+            // needsPosting catches this whether the whole item sold out
+            // (status "sold") or just one unit of a quantity>1 stock entry
+            // (status stays "ready" while the rest is still for sale) -
+            // stale catches stock that's been listed 30+ days without
+            // selling anywhere, and add_to_vinted catches something listed
+            // on eBay 7+ days that hasn't been added to Vinted yet.
             const needsVintedListing = (e) => {
               const p = getPipelineInfo(e);
               return p && p.stage === "ebay" && p.flag !== "none";
@@ -1951,7 +2022,7 @@ export default function Home() {
                 (e) =>
                   e.status === "needs_size" ||
                   e.status === "error" ||
-                  (e.status === "sold" && !e.posted_at) ||
+                  needsPosting(e) ||
                   isStaleListing(e) ||
                   needsVintedListing(e)
               )
@@ -1960,7 +2031,7 @@ export default function Home() {
                 _reason:
                   e.status === "needs_size" || e.status === "error"
                     ? "status"
-                    : e.status === "sold"
+                    : needsPosting(e)
                     ? "ready_for_posting"
                     : isStaleListing(e)
                     ? "stale"
@@ -3220,6 +3291,21 @@ export default function Home() {
                     {(selectedItem.quantity_sold || 0) > 0 && (
                       <span className="text-xs font-mono text-[#8A7F63]">{selectedItem.quantity_sold} sold so far</span>
                     )}
+                  </div>
+                )}
+
+                {needsPosting(selectedItem) && (
+                  <div className="bg-[#A63A2E]/10 border border-[#A63A2E]/40 rounded-sm p-3 mb-5 flex items-center justify-between gap-3">
+                    <span className="text-sm font-bold text-[#A63A2E]">
+                      {selectedItem.quantity_sold || 0} sold, needs posting — rest stays listed
+                    </span>
+                    <button
+                      onClick={() => confirmPosted(selectedItem)}
+                      className="shrink-0 py-2 px-3 rounded bg-[#A9822E] text-white font-bold text-sm flex items-center gap-1.5 active:scale-[0.98] transition"
+                    >
+                      <Check size={14} />
+                      Posted
+                    </button>
                   </div>
                 )}
 
