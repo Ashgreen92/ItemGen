@@ -9,7 +9,7 @@ const PHOTO_BUCKET = "item-photos";
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v2";
+const APP_VERSION = "v3";
 
 // ---------- storage helpers ----------
 
@@ -984,54 +984,25 @@ function DownloadablePhotos({ item, saveDirHandle, onChooseFolder, onRotate }) {
     </div>
   );
 }
-// Replaces the old single-shared-passcode gate with real per-person sign-in,
-// so two people (e.g. you and your mum) can each have their own private
-// stock in the same app instead of everyone sharing one passcode and one
-// pool of items. Supabase Auth handles the account/session itself; the
-// items/photos side of the privacy split lives in the RLS policies and the
-// user_id-prefixed storage paths, not here.
-function AuthGate() {
-  const [mode, setMode] = useState("signin"); // "signin" | "signup"
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [info, setInfo] = useState("");
-  const [busy, setBusy] = useState(false);
+// Multi-user sign-in (username + password via Supabase Auth) was built and
+// shipped in v1/v2, then paused before the second account was actually
+// introduced - it was getting in the way of normal single-user use (locked
+// you out of your own app, forced a Supabase dashboard setting change) for a
+// feature nobody was using yet. Reverted back to the original single shared
+// passcode here; the full sign-in version is preserved in the v2 changelog
+// entry and the delivered file from that point if it's wanted back later.
+function PasscodeGate({ onUnlock }) {
+  const [value, setValue] = useState("");
+  const [error, setError] = useState(false);
+  const expected = process.env.NEXT_PUBLIC_APP_PASSCODE;
 
-  // Supabase Auth is email-based under the hood, so a plain username gets
-  // turned into a fake address on a domain nobody can actually receive mail
-  // at - this ONLY works with "Confirm email" switched off in Supabase
-  // (Authentication -> Providers -> Email), otherwise sign-up "succeeds" but
-  // the confirmation link goes to an address that can't exist and sign-in
-  // can never complete.
-  const usernameToEmail = (u) => `${u.trim().toLowerCase().replace(/[^a-z0-9]/g, "")}@snaplisting.local`;
-
-  const submit = async (e) => {
+  const submit = (e) => {
     e.preventDefault();
-    setError("");
-    setInfo("");
-    const email = usernameToEmail(username);
-    if (email === "@snaplisting.local") {
-      setError("Enter a username");
-      return;
-    }
-    setBusy(true);
-    try {
-      if (mode === "signin") {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-        // No further action needed here - the onAuthStateChange listener in
-        // Home() picks up the new session and unlocks the app itself.
-      } else {
-        const { error } = await supabase.auth.signUp({ email, password });
-        if (error) throw error;
-        setInfo("Account created - sign in now.");
-        setMode("signin");
-      }
-    } catch (err) {
-      setError(err.message || "Something went wrong");
-    } finally {
-      setBusy(false);
+    if (!expected || value === expected) {
+      localStorage.setItem("snapstock-unlocked", "1");
+      onUnlock();
+    } else {
+      setError(true);
     }
   };
 
@@ -1045,46 +1016,19 @@ function AuthGate() {
           <span className="font-serif text-lg">ItemGen</span>
         </div>
         <input
-          type="text"
-          value={username}
+          type="password"
+          value={value}
           onChange={(e) => {
-            setUsername(e.target.value);
-            setError("");
+            setValue(e.target.value);
+            setError(false);
           }}
-          placeholder="Username"
-          autoCapitalize="none"
-          autoCorrect="off"
+          placeholder="Enter passcode"
           className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2.5 text-center"
           autoFocus
-          required
         />
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => {
-            setPassword(e.target.value);
-            setError("");
-          }}
-          placeholder="Password"
-          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2.5 text-center"
-          required
-          minLength={6}
-        />
-        {error && <p className="text-[#A63A2E] text-sm text-center">{error}</p>}
-        {info && <p className="text-[#3F5E42] text-sm text-center">{info}</p>}
-        <button type="submit" disabled={busy} className="w-full py-2.5 rounded-sm bg-[#A9822E] text-[#2B2620] font-bold disabled:opacity-50">
-          {busy ? "…" : mode === "signin" ? "Sign in" : "Create account"}
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setMode((m) => (m === "signin" ? "signup" : "signin"));
-            setError("");
-            setInfo("");
-          }}
-          className="text-xs text-[#6B6250] text-center underline"
-        >
-          {mode === "signin" ? "New here? Create an account" : "Already have an account? Sign in"}
+        {error && <p className="text-[#A63A2E] text-sm text-center">Wrong passcode</p>}
+        <button type="submit" className="w-full py-2.5 rounded-sm bg-[#A9822E] text-[#2B2620] font-bold">
+          Unlock
         </button>
       </form>
     </div>
@@ -1094,10 +1038,8 @@ function AuthGate() {
 // ---------- main app ----------
 
 export default function Home() {
-  const [unlocked, setUnlocked] = useState(false);
+  const [unlocked, setUnlocked] = useState(!process.env.NEXT_PUBLIC_APP_PASSCODE);
   const [checkedLock, setCheckedLock] = useState(false);
-  const [session, setSession] = useState(null);
-  const userId = session?.user?.id || null;
 
   const [view, setView] = useState("dashboard");
   const [items, setItems] = useState([]);
@@ -1176,32 +1118,14 @@ export default function Home() {
   const [editing, setEditing] = useState(false);
   const pollRef = useRef(null);
 
-  // Real per-person sign-in via Supabase Auth, replacing the old shared
-  // passcode. getSession() picks up an already-logged-in browser on load;
-  // onAuthStateChange keeps session/unlocked in sync after that (sign in,
-  // sign out, token refresh) without needing to reload the page.
   useEffect(() => {
-    let active = true;
-    supabase.auth.getSession().then(({ data }) => {
-      if (!active) return;
-      setSession(data.session || null);
-      setUnlocked(!!data.session);
+    if (typeof window !== "undefined") {
+      if (!process.env.NEXT_PUBLIC_APP_PASSCODE || localStorage.getItem("snapstock-unlocked") === "1") {
+        setUnlocked(true);
+      }
       setCheckedLock(true);
-    });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      setSession(newSession);
-      setUnlocked(!!newSession);
-    });
-    return () => {
-      active = false;
-      listener.subscription.unsubscribe();
-    };
+    }
   }, []);
-
-  const signOut = async () => {
-    await supabase.auth.signOut();
-    setSettingsOpen(false);
-  };
 
   const fetchItems = useCallback(async () => {
     const leanColumns =
@@ -1878,7 +1802,7 @@ export default function Home() {
   };
 
   if (!checkedLock) return null;
-  if (!unlocked) return <AuthGate />;
+  if (!unlocked) return <PasscodeGate onUnlock={() => setUnlocked(true)} />;
 
   return (
     <div className="min-h-screen bg-[#EDE6D6] text-[#2B2620] flex flex-col relative">
@@ -1954,14 +1878,6 @@ export default function Home() {
             </button>
             {settingsOpen && (
               <div className="absolute right-0 mt-1 w-64 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm shadow-lg z-20 p-1">
-                {session?.user?.email && (
-                  <div className="px-3 py-2 text-xs text-[#8A7F63] border-b border-[#C9BFA3] mb-1 truncate">
-                    {/* Real account identifier is a fake @snaplisting.local email (see
-                       AuthGate) since the login itself is username-only - strip that
-                       part back off so this just shows the username you typed. */}
-                    Signed in as {session.user.email.replace("@snaplisting.local", "")}
-                  </div>
-                )}
                 <button
                   onClick={() => {
                     setSettingsOpen(false);
@@ -1984,13 +1900,7 @@ export default function Home() {
                   {exportingExcel ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
                   {exportingExcel ? "Preparing spreadsheet…" : "Export stock as Excel"}
                 </button>
-                <button
-                  onClick={signOut}
-                  className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#A63A2E] hover:bg-[#DCD4BC] flex items-center gap-2 border-t border-[#C9BFA3] pt-2"
-                >
-                  Sign out
-                </button>
-                <div className="px-3 pt-2 pb-1 text-[10px] font-mono text-[#8A7F63] text-center">{APP_VERSION}</div>
+                <div className="px-3 pt-2 pb-1 text-[10px] font-mono text-[#8A7F63] text-center border-t border-[#C9BFA3] mt-1">{APP_VERSION}</div>
               </div>
             )}
           </div>
