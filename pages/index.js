@@ -2,14 +2,14 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download, Settings as SettingsIcon, Menu, RotateCw, RotateCcw } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
-const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra"];
+const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra 1", "Extra 2", "Extra 3"];
 const PHOTO_BUCKET = "item-photos";
 
 // Bump this on every meaningful change to index.js/analyze.js and mention
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v3";
+const APP_VERSION = "v4";
 
 // ---------- storage helpers ----------
 
@@ -1243,8 +1243,8 @@ export default function Home() {
     try {
       const full = await compressImage(file, 1600, 0.85);
       const result = await autoEnhance(full);
-      setCurrentPhotos((prev) => [...prev, result.url].slice(0, 5));
-      setEnhancedFlags((prev) => [...prev, result.enhanced].slice(0, 5));
+      setCurrentPhotos((prev) => [...prev, result.url].slice(0, 7));
+      setEnhancedFlags((prev) => [...prev, result.enhanced].slice(0, 7));
     } catch (err) {
       console.error(err);
     } finally {
@@ -1757,7 +1757,17 @@ export default function Home() {
   const confirmPosted = async (item) => {
     const now = new Date().toISOString();
     if (item.status !== "sold") {
-      await supabase.from("items").update({ posted_at: now }).eq("id", item.id);
+      // Same class of bug already hit once before with runFullGeneration
+      // (see the comment on that update call): Supabase doesn't throw on a
+      // failed update, it just returns an error object, so it has to be
+      // checked explicitly or the click looks like it worked (optimistic
+      // local state update below) while the row never actually changes -
+      // which is exactly "still says needs posting after clicking Posted".
+      const { error } = await supabase.from("items").update({ posted_at: now }).eq("id", item.id);
+      if (error) {
+        alert("Couldn't mark this posted: " + error.message);
+        return;
+      }
       setSelectedItem({ ...item, posted_at: now });
       fetchItems();
       return;
@@ -1790,7 +1800,14 @@ export default function Home() {
         console.error("Failed to upload archive thumbnail for", item.id, err);
       }
     }
-    await supabase.from("items").update({ posted_at: now, photos: [], thumbnail: archiveThumbnail }).eq("id", item.id);
+    const { error: postError } = await supabase
+      .from("items")
+      .update({ posted_at: now, photos: [], thumbnail: archiveThumbnail })
+      .eq("id", item.id);
+    if (postError) {
+      alert("Couldn't mark this posted: " + postError.message);
+      return;
+    }
     setSelectedItem({ ...item, posted_at: now, photos: [], thumbnail: archiveThumbnail });
     fetchItems();
   };
@@ -2727,7 +2744,7 @@ export default function Home() {
             For best results, try to capture: <span className="font-bold text-[#2B2620]">front · back · label or markings · close-up of any damage · one extra angle</span>. Press <span className="text-[#2B2620] font-medium">Next item</span> to submit these photos for AI identification and pricing.
           </p>
 
-          <div className="grid grid-cols-5 gap-2 mb-1">
+          <div className="grid grid-cols-4 gap-2 mb-1">
             {SHOT_LABELS.map((label, i) => (
               <div key={i} className="aspect-square rounded-sm border border-[#C9BFA3] overflow-hidden flex items-center justify-center bg-[#F7F3E8] relative">
                 {currentPhotos[i] ? (
@@ -2757,7 +2774,7 @@ export default function Home() {
               </div>
             ))}
           </div>
-          <div className="grid grid-cols-5 gap-2 mb-4">
+          <div className="grid grid-cols-4 gap-2 mb-4">
             {SHOT_LABELS.map((label, i) => (
               <span key={i} className="text-[9px] text-center text-[#8A7F63] uppercase tracking-wide">
                 {i + 1}{i < 2 ? " · req" : ""}
@@ -2768,33 +2785,33 @@ export default function Home() {
           <div className="grid grid-cols-2 gap-2 mb-3">
             <div
               className={`relative py-4 rounded bg-[#F7F3E8] border border-[#C9BFA3] flex items-center justify-center gap-2 font-medium text-[#2B2620] ${
-                currentPhotos.length >= 5 || capturing ? "opacity-40" : ""
+                currentPhotos.length >= 7 || capturing ? "opacity-40" : ""
               }`}
             >
               {capturing ? <Loader2 size={18} className="animate-spin" /> : <Camera size={18} />}
-              {currentPhotos.length >= 5 ? "Full" : "Take photo"}
+              {currentPhotos.length >= 7 ? "Full" : "Take photo"}
               <input
                 type="file"
                 accept="image/*"
                 capture="environment"
                 onChange={handleAddPhoto}
-                disabled={currentPhotos.length >= 5 || capturing}
+                disabled={currentPhotos.length >= 7 || capturing}
                 style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
               />
             </div>
 
             <div
               className={`relative py-4 rounded bg-[#F7F3E8] border border-[#C9BFA3] flex items-center justify-center gap-2 font-medium text-[#2B2620] ${
-                currentPhotos.length >= 5 || capturing ? "opacity-40" : ""
+                currentPhotos.length >= 7 || capturing ? "opacity-40" : ""
               }`}
             >
               <ImageIcon size={18} />
-              {currentPhotos.length >= 5 ? "Full" : "From gallery"}
+              {currentPhotos.length >= 7 ? "Full" : "From gallery"}
               <input
                 type="file"
                 accept="image/*"
                 onChange={handleAddPhoto}
-                disabled={currentPhotos.length >= 5 || capturing}
+                disabled={currentPhotos.length >= 7 || capturing}
                 style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
               />
             </div>
