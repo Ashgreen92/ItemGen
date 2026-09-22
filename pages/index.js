@@ -9,7 +9,7 @@ const PHOTO_BUCKET = "item-photos";
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v4";
+const APP_VERSION = "v5";
 
 // ---------- storage helpers ----------
 
@@ -532,49 +532,133 @@ const UK_SIZE_TO_BUCKET = [
   { max: 22, bucket: "XL" },
   { max: 26, bucket: "XXL" },
 ];
+// Includes bilingual (French PS/S/SP/L/G/LG) and US plus-size (1X/2X/3X)
+// synonyms found in real stock - built from an actual export of Ashley's
+// stock, not guessed. Single-letter keys (s, m, l, g, p) only ever match a
+// WHOLE token (see resolveToken below), never as a prefix, so they can't
+// accidentally eat part of an unrelated code.
 const LETTER_BUCKET_ALIASES = {
-  xxs: "XS", "extra extra small": "XS", xs: "XS", "extra small": "XS", "x-small": "XS",
-  s: "S", small: "S",
-  m: "M", medium: "M", "med": "M",
-  l: "L", large: "L",
-  xl: "XL", "extra large": "XL", "x-large": "XL",
-  xxl: "XXL", "extra extra large": "XXL", "2xl": "XXL",
-  xxxl: "XXXL", "3xl": "XXXL",
+  xxs: "XS", "extra extra small": "XS", xs: "XS", "extra small": "XS", "x-small": "XS", tp: "XS",
+  s: "S", small: "S", p: "S", petit: "S", petite: "S", sp: "S", ps: "S",
+  m: "M", medium: "M", med: "M",
+  l: "L", large: "L", g: "L", grand: "L", lg: "L",
+  xl: "XL", "extra large": "XL", "x-large": "XL", "1x": "XL", tg: "XL",
+  xxl: "XXL", "extra extra large": "XXL", "2xl": "XXL", "2x": "XXL",
+  xxxl: "XXXL", "3xl": "XXXL", "3x": "XXXL",
 };
+const SIZE_BUCKET_ORDER = ["XS", "S", "M", "L", "XL", "XXL", "XXXL"];
+const DESCRIPTOR_SUFFIX = /^(\d{1,2})\s*[\s-]?(reg|regular|tall|petite|plus|std|standard)$/;
+const GENDER_WORD = /\b(women'?s?|mens?|ladies)\b/g;
 
-// Returns a canonical bucket (e.g. "M") when confident, or the original
-// trimmed string when not - unrecognised sizes never get force-merged with
-// anything else, they just group with identical-looking labels as before.
-// garmentType matters: trousers/jeans use waist inches, which overlap the
-// same number range as UK dress sizes but mean something completely
-// different - the dress-size chart must never apply to those.
-function normalizeSize(rawSize, garmentType) {
+// Resolves one size token to { bucket, origin }, or null when nothing
+// matches. origin distinguishes a letter-derived bucket from a
+// numeric-chart one, because a mixed pair ("12-M") needs different handling
+// from a genuine dual-span ("18/20") - see normalizeSize below.
+function resolveSizeToken(tok, skipDressChart) {
+  const t = tok.trim().toLowerCase();
+  if (!t) return null;
+  if (LETTER_BUCKET_ALIASES[t]) return { bucket: LETTER_BUCKET_ALIASES[t], origin: "letter" };
+  // Prefix match for compound codes like "3XLT" (3XL + Tall) or "2XG" -
+  // longest alias first so "3xl" wins over "3x" for "3xlt".
+  const keys = Object.keys(LETTER_BUCKET_ALIASES).sort((a, b) => b.length - a.length);
+  for (const key of keys) {
+    if (key.length >= 2 && t.startsWith(key)) return { bucket: LETTER_BUCKET_ALIASES[key], origin: "letter" };
+  }
+  if (skipDressChart) return null;
+  const m = t.match(/^(?:uk\s*|us\s*)?(\d{1,2})$/);
+  if (!m) return null;
+  const num = Number(m[1]);
+  if (num < 4 || num > 26) return null;
+  const hit = UK_SIZE_TO_BUCKET.find((b) => num <= b.max);
+  return hit ? { bucket: hit.bucket, origin: "numeric" } : null;
+}
+
+// Returns an array of canonical buckets (e.g. ["M"], or ["L","XL"] for a
+// genuine dual-span size like "18/20") when confident, or [rawSize] when
+// not - unrecognised sizes never get force-merged with anything else, they
+// just group with identical-looking labels as before.
+//
+// garmentType matters: trousers/jeans/dungarees use waist inches and
+// footwear uses shoe sizing, both of which overlap the same number range
+// as UK dress sizes but mean something completely different - the
+// dress-size chart must never apply to those. genderLabel (from
+// parseGender) matters too: kids' sizes are ages/heights, not dress sizes,
+// and aren't always spelled with the word "years" (e.g. a Girls' swimsuit
+// labelled just "8").
+function normalizeSize(rawSize, garmentType, genderLabel) {
   if (!rawSize) return null;
-  const s = rawSize.trim().toLowerCase();
-  const isWaistSized = garmentType && /trouser|jean|pant|legging|short|chino/i.test(garmentType);
+  let s = rawSize.trim().toLowerCase();
+  s = s.replace(GENDER_WORD, " ").replace(/\s+/g, " ").trim();
 
-  // Kids' age-based sizing stays entirely separate from adult letter/numeric
-  // sizes - never bucket these together with the adult chart above.
-  if (/\byears?\b|\byrs?\b|\bage\b|\bmonths?\b|\bmos?\b/.test(s)) return `Kids: ${s}`;
+  const isKidsCategory = genderLabel === "Boys'" || genderLabel === "Girls'" || genderLabel === "Kids'";
+  const isWaistSized = garmentType && /trouser|jean|pant|legging|short|chino|dungaree|overall/i.test(garmentType);
+  const isShoeSized = garmentType && /boot|trainer|\bshoe|sandal|\bheel|sneaker|wellington|\bwelly|slipper|flip.?flop/i.test(garmentType);
+  const skipDressChart = isWaistSized || isShoeSized;
 
-  if (LETTER_BUCKET_ALIASES[s]) return LETTER_BUCKET_ALIASES[s];
+  // Kids' sizing stays entirely separate from adult letter/numeric sizes -
+  // never bucket these together with the adult chart above.
+  if (isKidsCategory || /\byears?\b|\byrs?\b|\bage\b|\bmonths?\b|\bmos?\b|\binfant\b/.test(s)) {
+    return [`Kids: ${s}`];
+  }
 
-  if (!isWaistSized) {
-    // A range like "12-14" or "12 to 14" - use the lower number, since ranges
-    // are typically written smaller-first.
-    const rangeMatch = s.match(/^(\d{1,2})\s*(?:-|to)\s*(\d{1,2})$/);
-    const singleMatch = s.match(/^(?:uk\s*)?(\d{1,2})$/);
-    const num = rangeMatch ? Number(rangeMatch[1]) : singleMatch ? Number(singleMatch[1]) : null;
+  // Strip a trailing fit descriptor off a bare number, e.g. "42 REG" -> "42".
+  const dm = s.match(DESCRIPTOR_SUFFIX);
+  if (dm) s = dm[1];
 
-    if (num != null && num >= 4 && num <= 26) {
-      const hit = UK_SIZE_TO_BUCKET.find((b) => num <= b.max);
-      if (hit) return hit.bucket;
+  // Waist-sized garments don't map onto the dress chart, but the number is
+  // still worth grouping on - pull it out of the common label shapes
+  // ("26W 32L", "10/30R", bare "34", "US 34") instead of discarding it.
+  if (isWaistSized) {
+    const w =
+      s.match(/^(\d{1,2})\s*w\b/) ||
+      s.match(/^(\d{1,2})\/\d{1,3}r\b/) ||
+      s.match(/^(?:uk\s*|us\s*)?(\d{1,2})$/);
+    if (w) return [`W${w[1]}`];
+  }
+
+  // Whole-string resolve first (covers plain letters/numbers and compound
+  // codes like "2XL").
+  const direct = resolveSizeToken(s, skipDressChart);
+  if (direct) return [direct.bucket];
+
+  // A leading letter-size word ahead of parenthetical/trailing noise, e.g.
+  // "M (8-10)" - brands often state the letter size first.
+  if (!skipDressChart) {
+    const firstTok = s.split(" ")[0];
+    if (firstTok && LETTER_BUCKET_ALIASES[firstTok]) return [LETTER_BUCKET_ALIASES[firstTok]];
+  }
+
+  // Split on "/" or "-" and resolve each side independently, e.g. "18/20",
+  // "S/M", "12-M".
+  if (s.includes("/") || s.includes("-")) {
+    const sides = s.split(/[/-]/).map((x) => x.trim()).filter(Boolean);
+    const resolved = sides.map((x) => resolveSizeToken(x, skipDressChart)).filter(Boolean);
+    if (resolved.length) {
+      const origins = new Set(resolved.map((r) => r.origin));
+      let buckets;
+      if (origins.has("letter") && origins.has("numeric")) {
+        // Mixed number+letter pair ("12-M", "18-M", "M-REG") - the brand is
+        // stating its own equivalence, not a dual size span. Trust the
+        // letter side rather than our own numeric chart.
+        buckets = resolved.filter((r) => r.origin === "letter").map((r) => r.bucket);
+      } else {
+        // Genuine dual-span (both numeric - "18/20" - or both letter -
+        // "S/M") - the item fits both groups, so it should surface in both.
+        buckets = resolved.map((r) => r.bucket);
+      }
+      const uniq = [...new Set(buckets)];
+      uniq.sort((a, b) => {
+        const ia = SIZE_BUCKET_ORDER.indexOf(a);
+        const ib = SIZE_BUCKET_ORDER.indexOf(b);
+        return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+      });
+      return uniq;
     }
   }
 
-  // Not something we're confident about (waist sizes, shoe sizes, odd
+  // Not something we're confident about (bra sizes, shoe sizes, odd
   // formats) - return as-is so it still groups with identical labels.
-  return rawSize.trim();
+  return [rawSize.trim()];
 }
 
 function isStaleListing(item) {
@@ -1056,6 +1140,12 @@ export default function Home() {
   const [bundleFilterGender, setBundleFilterGender] = useState("all");
   const [bundleFilterGarment, setBundleFilterGarment] = useState("all");
   const [bundleFilterSize, setBundleFilterSize] = useState("all");
+  const [bundleRecords, setBundleRecords] = useState({});
+  const [selectedBundle, setSelectedBundle] = useState(null);
+  const [bundleTitleInput, setBundleTitleInput] = useState("");
+  const [bundleDescInput, setBundleDescInput] = useState("");
+  const [bundleMainPhoto, setBundleMainPhoto] = useState("");
+  const [savingBundle, setSavingBundle] = useState(false);
   const [soldTypeFilter, setSoldTypeFilter] = useState("all");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -1159,6 +1249,24 @@ export default function Home() {
     setBargains(data || []);
   }, []);
 
+  // Bundle detail (title/description/main photo) is keyed by group_key -
+  // the same "category|sizeBucket" key the Bundles view groups items by -
+  // rather than by item IDs, so a saved bundle keeps its title/description
+  // as stock comes and goes and just picks up whichever items currently
+  // match that category+size.
+  const fetchBundleRecords = useCallback(async () => {
+    const { data, error } = await supabase.from("bundles").select("*");
+    if (error) {
+      console.error("fetchBundleRecords failed:", error);
+      return;
+    }
+    const map = {};
+    (data || []).forEach((b) => {
+      map[b.group_key] = b;
+    });
+    setBundleRecords(map);
+  }, []);
+
   const fetchBargainSettings = useCallback(async () => {
     const { data } = await supabase.from("bargain_settings").select("*").eq("id", "default").single();
     const settings = data || {
@@ -1189,7 +1297,38 @@ export default function Home() {
     fetchBargains();
     fetchBargainSettings();
     fetchLastBackup();
-  }, [unlocked, fetchBargains, fetchBargainSettings, fetchLastBackup]);
+    fetchBundleRecords();
+  }, [unlocked, fetchBargains, fetchBargainSettings, fetchLastBackup, fetchBundleRecords]);
+
+  const openBundle = (group) => {
+    setSelectedBundle(group);
+    const rec = bundleRecords[group.key];
+    setBundleTitleInput(rec?.title ?? `${group.items.length}× ${group.items[0].category} · Size ${group.bucket}`);
+    setBundleDescInput(rec?.description ?? "");
+    setBundleMainPhoto(rec?.main_photo ?? group.items[0]?.thumbnail ?? "");
+  };
+
+  const closeBundle = () => setSelectedBundle(null);
+
+  const saveBundle = async () => {
+    if (!selectedBundle) return;
+    setSavingBundle(true);
+    const payload = {
+      group_key: selectedBundle.key,
+      title: bundleTitleInput.trim(),
+      description: bundleDescInput.trim(),
+      main_photo: bundleMainPhoto || null,
+      updated_at: new Date().toISOString(),
+    };
+    const { data, error } = await supabase.from("bundles").upsert(payload, { onConflict: "group_key" }).select().single();
+    setSavingBundle(false);
+    if (error) {
+      alert("Couldn't save this bundle: " + error.message);
+      return;
+    }
+    setBundleRecords((prev) => ({ ...prev, [selectedBundle.key]: data }));
+    setSelectedBundle(null);
+  };
 
   const saveBargainSettings = async () => {
     if (!bargainSettingsDraft) return;
@@ -2418,11 +2557,15 @@ export default function Home() {
               .filter((e) => e.status === "ready")
               .map((e) => {
                 const garment = parseGarmentType(e.category);
+                const gender = parseGender(e.category);
                 return {
                   ...e,
-                  _gender: parseGender(e.category),
+                  _gender: gender,
                   _garment: garment,
-                  _sizeBucket: normalizeSize(e.size, garment),
+                  // An array, not a single bucket - a genuine dual-span size
+                  // like "18/20" belongs in both the "18"(L) and "20"(XL)
+                  // groups rather than forming its own separate one.
+                  _sizeBuckets: normalizeSize(e.size, garment, gender) || [],
                   _ageDays: daysSince(e.created_at) ?? 0,
                 };
               });
@@ -2433,31 +2576,39 @@ export default function Home() {
             const garmentOptions = [...new Set(readyItems.map((e) => e._garment).filter(Boolean))].sort();
             // Size options are the normalized buckets, not raw labels - so
             // picking "M" catches "M", "12-14", and "12" all at once.
-            const sizeOptions = [...new Set(readyItems.map((e) => e._sizeBucket).filter(Boolean))].sort();
+            const sizeOptions = [...new Set(readyItems.flatMap((e) => e._sizeBuckets))].sort();
 
             const filtered = readyItems.filter(
               (e) =>
                 (bundleFilterGender === "all" || e._gender === bundleFilterGender) &&
                 (bundleFilterGarment === "all" || e._garment === bundleFilterGarment) &&
-                (bundleFilterSize === "all" || e._sizeBucket === bundleFilterSize)
+                (bundleFilterSize === "all" || e._sizeBuckets.includes(bundleFilterSize))
             );
             const filtersActive = bundleFilterGender !== "all" || bundleFilterGarment !== "all" || bundleFilterSize !== "all";
 
             // Same category + normalized size bucket, count >= 2 - the
             // automatic suggestion list. Grouping on the bucket (not the raw
             // size text) is what catches "12-14"/"M"/"12" as the same size.
+            // A dual-span item is added to every bucket it belongs to, so it
+            // can surface in more than one suggested bundle.
             // Sorted so groups containing older stock surface first, since
             // ageing stock is exactly what most needs bundling out.
             const groups = {};
             readyItems.forEach((e) => {
-              if (!e.category || !e._sizeBucket) return;
-              const key = `${e.category.trim().toLowerCase()}|${e._sizeBucket.toLowerCase()}`;
-              if (!groups[key]) groups[key] = [];
-              groups[key].push(e);
+              if (!e.category || !e._sizeBuckets.length) return;
+              const seen = new Set();
+              e._sizeBuckets.forEach((bucket) => {
+                const bucketKey = bucket.toLowerCase();
+                if (seen.has(bucketKey)) return;
+                seen.add(bucketKey);
+                const key = `${e.category.trim().toLowerCase()}|${bucketKey}`;
+                if (!groups[key]) groups[key] = { key, bucket, items: [] };
+                groups[key].items.push(e);
+              });
             });
             const bundleSuggestions = Object.values(groups)
-              .filter((g) => g.length >= 2)
-              .map((g) => ({ items: g, maxAge: Math.max(...g.map((e) => e._ageDays)) }))
+              .filter((g) => g.items.length >= 2)
+              .map((g) => ({ key: g.key, bucket: g.bucket, items: g.items, maxAge: Math.max(...g.items.map((e) => e._ageDays)) }))
               .sort((a, b) => b.maxAge - a.maxAge);
 
             return (
@@ -2533,26 +2684,40 @@ export default function Home() {
                   <div className="flex flex-col gap-2">
                     {bundleSuggestions.map((group, i) => {
                       const aged = group.maxAge >= AGED_DAYS_THRESHOLD;
+                      const saved = bundleRecords[group.key];
                       return (
                         <div
                           key={i}
-                          className={`rounded-sm p-3 border ${aged ? "bg-[#A63A2E]/8 border-[#A63A2E]/30" : "bg-[#A9822E]/8 border-[#A9822E]/30"}`}
+                          onClick={() => openBundle(group)}
+                          role="button"
+                          tabIndex={0}
+                          className={`rounded-sm p-3 border cursor-pointer transition hover:brightness-95 ${aged ? "bg-[#A63A2E]/8 border-[#A63A2E]/30" : "bg-[#A9822E]/8 border-[#A9822E]/30"}`}
                         >
-                          <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center justify-between mb-2 gap-2">
                             <p className="text-sm font-medium">
-                              {group.items.length}× {group.items[0].category} · Size {group.items[0]._sizeBucket}
+                              {saved?.title || `${group.items.length}× ${group.items[0].category} · Size ${group.bucket}`}
                             </p>
-                            {aged && (
-                              <span className="text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#A63A2E] text-white shrink-0">
-                                Aged {group.maxAge}d
-                              </span>
-                            )}
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {saved && (
+                                <span className="text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#3F5E42]/15 text-[#3F5E42]">
+                                  Saved
+                                </span>
+                              )}
+                              {aged && (
+                                <span className="text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#A63A2E] text-white">
+                                  Aged {group.maxAge}d
+                                </span>
+                              )}
+                            </div>
                           </div>
                           <div className="flex flex-col gap-1.5">
                             {group.items.map((e) => (
                               <button
                                 key={e.id}
-                                onClick={() => openItem(e)}
+                                onClick={(ev) => {
+                                  ev.stopPropagation();
+                                  openItem(e);
+                                }}
                                 className="text-sm text-left text-[#2B2620] underline decoration-[#C9BFA3] flex items-center gap-1.5"
                               >
                                 {e.title}
@@ -2563,6 +2728,90 @@ export default function Home() {
                         </div>
                       );
                     })}
+                  </div>
+                )}
+
+                {selectedBundle && (
+                  <div className="fixed inset-0 bg-[#2B2620]/60 z-30 flex items-end sm:items-center justify-center p-4">
+                    <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto">
+                      <p className="font-serif text-lg mb-1">Bundle details</p>
+                      <p className="text-xs text-[#8A7F63] mb-4">
+                        {selectedBundle.items.length} items · {selectedBundle.items[0].category} · Size {selectedBundle.bucket}
+                      </p>
+                      <div className="flex flex-col gap-3">
+                        <div>
+                          <label className="text-xs text-[#8A7F63] mb-1 block">Title</label>
+                          <input
+                            value={bundleTitleInput}
+                            onChange={(e) => setBundleTitleInput(e.target.value)}
+                            className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
+                            autoFocus
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs text-[#8A7F63] mb-1 block">Description</label>
+                          <textarea
+                            value={bundleDescInput}
+                            onChange={(e) => setBundleDescInput(e.target.value)}
+                            rows={4}
+                            className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm resize-none"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs text-[#8A7F63] mb-1 block">Main photo</label>
+                          {selectedBundle.items.some((e) => e.thumbnail) ? (
+                            <div className="grid grid-cols-4 gap-2">
+                              {selectedBundle.items
+                                .filter((e) => e.thumbnail)
+                                .map((e) => (
+                                  <button
+                                    key={e.id}
+                                    type="button"
+                                    onClick={() => setBundleMainPhoto(e.thumbnail)}
+                                    className={`aspect-square rounded-sm overflow-hidden border-2 ${
+                                      bundleMainPhoto === e.thumbnail ? "border-[#A9822E]" : "border-transparent"
+                                    }`}
+                                  >
+                                    <img src={e.thumbnail} alt="" className="w-full h-full object-cover" />
+                                  </button>
+                                ))}
+                            </div>
+                          ) : (
+                            <p className="text-xs text-[#8A7F63]">No photos available yet for these items.</p>
+                          )}
+                        </div>
+                        <div className="flex flex-col gap-1.5 pt-2 mt-1 border-t border-[#C9BFA3]">
+                          <p className="text-[10px] uppercase tracking-wide text-[#8A7F63] mb-1">Items in this bundle</p>
+                          {selectedBundle.items.map((e) => (
+                            <button
+                              key={e.id}
+                              onClick={() => {
+                                setSelectedBundle(null);
+                                openItem(e);
+                              }}
+                              className="text-sm text-left text-[#2B2620] underline decoration-[#C9BFA3]"
+                            >
+                              {e.title}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="flex gap-2 mt-5">
+                        <button
+                          onClick={closeBundle}
+                          className="flex-1 py-2.5 rounded bg-[#DCD4BC] text-[#2B2620] font-medium"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={saveBundle}
+                          disabled={savingBundle || !bundleTitleInput.trim()}
+                          className="flex-1 py-2.5 rounded bg-[#A9822E] text-[#2B2620] font-bold disabled:opacity-40"
+                        >
+                          {savingBundle ? "Saving…" : "Save"}
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 )}
               </>
