@@ -5,6 +5,12 @@ import { supabase } from "../lib/supabaseClient";
 const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra"];
 const PHOTO_BUCKET = "item-photos";
 
+// Bump this on every meaningful change to index.js/analyze.js and mention
+// the new number when sending updated files - lets you glance at Settings
+// and know exactly what's actually deployed versus what's been sent but not
+// copied over yet, instead of having to guess or ask.
+const APP_VERSION = "v2";
+
 // ---------- storage helpers ----------
 
 // Uploads a data URL to Supabase Storage and returns its public URL.
@@ -986,16 +992,29 @@ function DownloadablePhotos({ item, saveDirHandle, onChooseFolder, onRotate }) {
 // user_id-prefixed storage paths, not here.
 function AuthGate() {
   const [mode, setMode] = useState("signin"); // "signin" | "signup"
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
 
+  // Supabase Auth is email-based under the hood, so a plain username gets
+  // turned into a fake address on a domain nobody can actually receive mail
+  // at - this ONLY works with "Confirm email" switched off in Supabase
+  // (Authentication -> Providers -> Email), otherwise sign-up "succeeds" but
+  // the confirmation link goes to an address that can't exist and sign-in
+  // can never complete.
+  const usernameToEmail = (u) => `${u.trim().toLowerCase().replace(/[^a-z0-9]/g, "")}@snaplisting.local`;
+
   const submit = async (e) => {
     e.preventDefault();
     setError("");
     setInfo("");
+    const email = usernameToEmail(username);
+    if (email === "@snaplisting.local") {
+      setError("Enter a username");
+      return;
+    }
     setBusy(true);
     try {
       if (mode === "signin") {
@@ -1006,7 +1025,7 @@ function AuthGate() {
       } else {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
-        setInfo("Account created. Check your email to confirm it, then sign in.");
+        setInfo("Account created - sign in now.");
         setMode("signin");
       }
     } catch (err) {
@@ -1026,13 +1045,15 @@ function AuthGate() {
           <span className="font-serif text-lg">ItemGen</span>
         </div>
         <input
-          type="email"
-          value={email}
+          type="text"
+          value={username}
           onChange={(e) => {
-            setEmail(e.target.value);
+            setUsername(e.target.value);
             setError("");
           }}
-          placeholder="Email"
+          placeholder="Username"
+          autoCapitalize="none"
+          autoCorrect="off"
           className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2.5 text-center"
           autoFocus
           required
@@ -1935,7 +1956,10 @@ export default function Home() {
               <div className="absolute right-0 mt-1 w-64 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm shadow-lg z-20 p-1">
                 {session?.user?.email && (
                   <div className="px-3 py-2 text-xs text-[#8A7F63] border-b border-[#C9BFA3] mb-1 truncate">
-                    Signed in as {session.user.email}
+                    {/* Real account identifier is a fake @snaplisting.local email (see
+                       AuthGate) since the login itself is username-only - strip that
+                       part back off so this just shows the username you typed. */}
+                    Signed in as {session.user.email.replace("@snaplisting.local", "")}
                   </div>
                 )}
                 <button
@@ -1962,10 +1986,11 @@ export default function Home() {
                 </button>
                 <button
                   onClick={signOut}
-                  className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#A63A2E] hover:bg-[#DCD4BC] flex items-center gap-2 mt-1 border-t border-[#C9BFA3] pt-2"
+                  className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#A63A2E] hover:bg-[#DCD4BC] flex items-center gap-2 border-t border-[#C9BFA3] pt-2"
                 >
                   Sign out
                 </button>
+                <div className="px-3 pt-2 pb-1 text-[10px] font-mono text-[#8A7F63] text-center">{APP_VERSION}</div>
               </div>
             )}
           </div>
