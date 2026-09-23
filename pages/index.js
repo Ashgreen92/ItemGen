@@ -9,7 +9,7 @@ const PHOTO_BUCKET = "item-photos";
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v6";
+const APP_VERSION = "v7";
 
 // ---------- storage helpers ----------
 
@@ -252,13 +252,31 @@ async function analyzeItem(photos, mode, confirmedFields, ebaySearchQuery) {
   return res.json();
 }
 
+// Combined individual value + a suggested discounted bundle price - a real
+// number is a much stronger selling point than vague copy, but only worth
+// showing when every item in the group actually has a price estimate;
+// otherwise a partial total would misrepresent the bundle's value, so it's
+// skipped entirely rather than shown as a guess.
+function computeBundlePricing(items) {
+  if (!items.length || items.some((e) => e.recommended_price == null)) return null;
+  const combinedValue = items.reduce((sum, e) => sum + Number(e.recommended_price), 0);
+  if (!(combinedValue > 0)) return null;
+  // 15% off buying the items separately - a standard bundle incentive -
+  // rounded to the nearest 50p like the rest of the app's pricing.
+  const suggestedPrice = Math.round(combinedValue * 0.85 * 2) / 2;
+  return { combinedValue: Math.round(combinedValue * 2) / 2, suggestedPrice, savings: Math.round((combinedValue - suggestedPrice) * 2) / 2 };
+}
+
 // Text-only - no photos needed, just each item's already-written listing
 // title/size, so this is quick and cheap compared to the per-item AI pass.
-async function analyzeBundle(bundleItems, bundleCategory, bundleSizeLabel) {
+// bundlePricing (combinedValue/suggestedPrice) is optional - only passed
+// when every item in the group has a recommended_price, so the AI never has
+// to invent or half-guess a number.
+async function analyzeBundle(bundleItems, bundleCategory, bundleSizeLabel, bundlePricing) {
   const res = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode: "bundle", bundleItems, bundleCategory, bundleSizeLabel }),
+    body: JSON.stringify({ mode: "bundle", bundleItems, bundleCategory, bundleSizeLabel, bundlePricing }),
   });
   if (!res.ok) {
     let detail = "AI request failed";
@@ -1266,7 +1284,7 @@ export default function Home() {
 
   const fetchItems = useCallback(async () => {
     const leanColumns =
-      "id, title, thumbnail, status, sale_price, cost_price, sold_platform, sold_at, quantity, quantity_sold, created_at, category, size, batch, ebay_listed, vinted_listed, depop_listed, ebay_listed_at, vinted_listed_at, vinted_reduced_at, relisted_at, posted_at, item_type";
+      "id, title, thumbnail, status, sale_price, cost_price, recommended_price, sold_platform, sold_at, quantity, quantity_sold, created_at, category, size, batch, ebay_listed, vinted_listed, depop_listed, ebay_listed_at, vinted_listed_at, vinted_reduced_at, relisted_at, posted_at, item_type";
 
     let { data, error } = await supabase.from("items").select(leanColumns).order("created_at", { ascending: false });
 
@@ -1371,10 +1389,12 @@ export default function Home() {
     setBundleGenError("");
     setGeneratingBundle(true);
     try {
+      const pricing = computeBundlePricing(group.items);
       const gen = await analyzeBundle(
         group.items.map((e) => ({ title: e.title, size: e.size })),
         group.items[0].category,
-        group.bucket
+        group.bucket,
+        pricing
       );
       const title = gen.title || `${group.items.length}× ${group.items[0].category} · Size ${group.bucket}`;
       const description = gen.description || "";
@@ -2824,17 +2844,34 @@ export default function Home() {
                   </div>
                 )}
 
-                {selectedBundle && (
+                {selectedBundle && (() => {
+                  const bundlePricing = computeBundlePricing(selectedBundle.items);
+                  return (
                   <div className="fixed inset-0 bg-[#2B2620]/60 z-30 flex items-end sm:items-center justify-center p-4">
                     <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto">
                       <p className="font-serif text-lg mb-1">Bundle details</p>
-                      <p className="text-xs text-[#8A7F63] mb-1">
+                      <p className="text-xs text-[#8A7F63] mb-3">
                         {selectedBundle.items.length} items · {selectedBundle.items[0].category} · Size {selectedBundle.bucket}
                       </p>
+
+                      {bundlePricing && (
+                        <div className="flex items-center justify-between bg-[#3F5E42]/8 border border-[#3F5E42]/30 rounded-sm px-3 py-2 mb-3">
+                          <div>
+                            <p className="text-[10px] uppercase tracking-wide text-[#3F5E42]">Suggested bundle price</p>
+                            <p className="font-mono text-lg font-bold text-[#2B2620]">£{bundlePricing.suggestedPrice}</p>
+                          </div>
+                          <p className="text-xs text-[#6B6250] text-right">
+                            £{bundlePricing.combinedValue} bought separately
+                            <br />
+                            <span className="text-[#3F5E42] font-medium">save £{bundlePricing.savings}</span>
+                          </p>
+                        </div>
+                      )}
+
                       <p className="text-xs text-[#8A7F63] mb-4">
                         {generatingBundle
                           ? "Writing a title and description with AI…"
-                          : "Written automatically - edit anything below, then Save. Each field has its own Copy button so you can paste title and description straight into Vinted's own boxes."}
+                          : "Written automatically to help it sell - edit anything below, then Save. Each field has its own Copy button so you can paste title and description straight into Vinted's own boxes."}
                       </p>
                       {bundleGenError && (
                         <p className="text-xs text-[#A63A2E] bg-[#A63A2E]/8 border border-[#A63A2E]/30 rounded-sm px-3 py-2 mb-3">
@@ -2850,8 +2887,9 @@ export default function Home() {
                                 type="button"
                                 onClick={() => runBundleGeneration(selectedBundle, bundleMainPhoto, { autoSave: true })}
                                 disabled={generatingBundle}
-                                className="text-xs font-medium text-[#A9822E] disabled:opacity-40"
+                                className="flex items-center gap-1 text-xs font-medium text-[#A9822E] disabled:opacity-40"
                               >
+                                <RefreshCw size={12} className={generatingBundle ? "animate-spin" : ""} />
                                 {generatingBundle ? "Writing…" : "Regenerate"}
                               </button>
                               <InlineCopyButton text={bundleTitleInput} />
@@ -2876,7 +2914,7 @@ export default function Home() {
                             onChange={(e) => setBundleDescInput(e.target.value)}
                             disabled={generatingBundle}
                             placeholder={generatingBundle ? "Writing…" : ""}
-                            rows={4}
+                            rows={7}
                             className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm resize-none disabled:opacity-60"
                           />
                         </div>
@@ -2912,9 +2950,15 @@ export default function Home() {
                                 setSelectedBundle(null);
                                 openItem(e);
                               }}
-                              className="text-sm text-left text-[#2B2620] underline decoration-[#C9BFA3]"
+                              className="flex items-center gap-2 text-left"
                             >
-                              {e.title}
+                              <span className="w-8 h-8 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0">
+                                {e.thumbnail && <img src={e.thumbnail} alt="" className="w-full h-full object-cover" />}
+                              </span>
+                              <span className="text-sm text-[#2B2620] underline decoration-[#C9BFA3]">{e.title}</span>
+                              {e.recommended_price != null && (
+                                <span className="text-xs text-[#8A7F63] font-mono ml-auto shrink-0">£{e.recommended_price}</span>
+                              )}
                             </button>
                           ))}
                         </div>
@@ -2936,7 +2980,8 @@ export default function Home() {
                       </div>
                     </div>
                   </div>
-                )}
+                  );
+                })()}
               </>
             );
           })()}
