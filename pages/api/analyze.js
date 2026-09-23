@@ -73,27 +73,35 @@ Never invent a price, material, or product line. Anything you didn't actually se
 // items already in stock (each one already has an AI-written listing title
 // from when it was first catalogued, so there's plenty to work with without
 // needing another look at the photos).
-function buildBundlePrompt(items, category, sizeLabel) {
+function buildBundlePrompt(items, category, sizeLabel, pricing) {
   const itemLines = items.map((it, i) => `${i + 1}. ${it.title}${it.size ? ` (labelled size ${it.size})` : ""}`).join("\n");
-  return `You are writing a Vinted bundle listing for a UK reseller. This bundle contains ${items.length} items, all the same category and a matching size, being sold together as one listing.
+  const pricingNote =
+    pricing && pricing.combinedValue != null && pricing.suggestedPrice != null
+      ? `\n\nPricing (computed, not estimated by you - state these exact figures, never recalculate or round differently): buying these ${items.length} items separately would come to about £${pricing.combinedValue}; the suggested bundle price is £${pricing.suggestedPrice}, a saving of £${pricing.savings}. Work this into the description as a concrete selling point (e.g. mention the bundle price and/or the saving) - a real number that shows the buyer they're getting a deal is one of the strongest reasons to buy a bundle over single items.`
+      : "\n\nNo price data available for this bundle - do not mention a price, saving, or value figure anywhere, since none has been computed.";
+  return `You are writing a Vinted bundle listing for a UK reseller, optimised to actually sell - not just describe the items, but give a buyer a real reason to buy all of them together rather than none of them.
+
+This bundle contains ${items.length} items, all the same category and a matching size, being sold together as one listing.
 
 Items in this bundle:
 ${itemLines}
 
 Category: ${category}
-Size group: ${sizeLabel}
+Size group: ${sizeLabel}${pricingNote}
 
 Write a short, natural Vinted-style bundle title and description, ready to paste straight into a Vinted listing:
 - The title should read the way a real seller would title a bundle - short and natural, not keyword-stuffed (Vinted buyers filter through Vinted's own structured filters, not title keywords) - e.g. "Bundle of 5 women's jumpers size M".
-- The description must clearly state this is a bundle of ${items.length} items, then list out what's included so a buyer knows exactly what they're getting - condense/rephrase the item names above naturally into a readable list or short sentences, don't just dump the raw titles verbatim.
+- Open the description with what the buyer gets and why it's a good deal, then list out what's included so a buyer knows exactly what they're getting - condense/rephrase the item names above naturally into a readable list or short sentences, don't just dump the raw titles verbatim.
 - Mention the shared size (${sizeLabel}) once, near the top.
+- If it's genuinely true from the item names, a brief line on why these particular items work well together (matching style, versatile basics, ideal wardrobe refresh, popular size) can help - but only state something you can actually see in the names above, never invent a theme that isn't there.
+- Close with a short, natural nudge to buy as a bundle - postage is cheaper per item bought together, and/or the saving mentioned above if pricing was given. Keep it low-key, not pushy or salesy-sounding.
 - Friendly, natural reseller tone - like a person actually wrote it, not an AI. No phrases like "as listed above" or "as shown".
-- Do NOT mention condition, flaws, or wear - the seller adds that themselves. Do NOT invent any fact (brand, material, colour) that isn't already present in the item names above.
+- Do NOT mention condition, flaws, or wear - the seller adds that themselves. Do NOT invent any fact (brand, material, colour, price) that isn't already given above.
 
 Respond with ONLY a JSON object, no markdown fences, no commentary:
 {
   "title": "short natural bundle title",
-  "description": "2-4 sentence description listing what's included and the size, ready to paste straight into a Vinted listing"
+  "description": "3-5 sentence description that sells the bundle - what's included, the size, why buy together, ready to paste straight into a Vinted listing"
 }`;
 }
 
@@ -255,14 +263,14 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Server is missing ANTHROPIC_API_KEY" });
   }
 
-  const { photos, mode, confirmedFields, ebaySearchQuery, bundleItems, bundleCategory, bundleSizeLabel } = req.body || {};
+  const { photos, mode, confirmedFields, ebaySearchQuery, bundleItems, bundleCategory, bundleSizeLabel, bundlePricing } = req.body || {};
 
   if (mode === "bundle") {
     if (!Array.isArray(bundleItems) || bundleItems.length < 2) {
       return res.status(400).json({ error: "Need at least 2 items to write a bundle listing" });
     }
     try {
-      const promptText = buildBundlePrompt(bundleItems, bundleCategory || "items", bundleSizeLabel || "");
+      const promptText = buildBundlePrompt(bundleItems, bundleCategory || "items", bundleSizeLabel || "", bundlePricing);
       const response = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
@@ -272,7 +280,7 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify({
           model: "claude-sonnet-5",
-          max_tokens: 600,
+          max_tokens: 700,
           messages: [{ role: "user", content: [{ type: "text", text: promptText }] }],
         }),
       });
