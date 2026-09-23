@@ -69,6 +69,34 @@ Step 3: Respond with ONLY a JSON object as your final message, no markdown fence
 Never invent a price, material, or product line. Anything you didn't actually see clearly goes in verify_before_listing, not into the titles or description as stated fact.`;
 }
 
+// Bundle listings are text-only - no photos, just the titles/sizes of the
+// items already in stock (each one already has an AI-written listing title
+// from when it was first catalogued, so there's plenty to work with without
+// needing another look at the photos).
+function buildBundlePrompt(items, category, sizeLabel) {
+  const itemLines = items.map((it, i) => `${i + 1}. ${it.title}${it.size ? ` (labelled size ${it.size})` : ""}`).join("\n");
+  return `You are writing a Vinted bundle listing for a UK reseller. This bundle contains ${items.length} items, all the same category and a matching size, being sold together as one listing.
+
+Items in this bundle:
+${itemLines}
+
+Category: ${category}
+Size group: ${sizeLabel}
+
+Write a short, natural Vinted-style bundle title and description, ready to paste straight into a Vinted listing:
+- The title should read the way a real seller would title a bundle - short and natural, not keyword-stuffed (Vinted buyers filter through Vinted's own structured filters, not title keywords) - e.g. "Bundle of 5 women's jumpers size M".
+- The description must clearly state this is a bundle of ${items.length} items, then list out what's included so a buyer knows exactly what they're getting - condense/rephrase the item names above naturally into a readable list or short sentences, don't just dump the raw titles verbatim.
+- Mention the shared size (${sizeLabel}) once, near the top.
+- Friendly, natural reseller tone - like a person actually wrote it, not an AI. No phrases like "as listed above" or "as shown".
+- Do NOT mention condition, flaws, or wear - the seller adds that themselves. Do NOT invent any fact (brand, material, colour) that isn't already present in the item names above.
+
+Respond with ONLY a JSON object, no markdown fences, no commentary:
+{
+  "title": "short natural bundle title",
+  "description": "2-4 sentence description listing what's included and the size, ready to paste straight into a Vinted listing"
+}`;
+}
+
 export const config = {
   api: {
     bodyParser: {
@@ -227,7 +255,52 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Server is missing ANTHROPIC_API_KEY" });
   }
 
-  const { photos, mode, confirmedFields, ebaySearchQuery } = req.body || {};
+  const { photos, mode, confirmedFields, ebaySearchQuery, bundleItems, bundleCategory, bundleSizeLabel } = req.body || {};
+
+  if (mode === "bundle") {
+    if (!Array.isArray(bundleItems) || bundleItems.length < 2) {
+      return res.status(400).json({ error: "Need at least 2 items to write a bundle listing" });
+    }
+    try {
+      const promptText = buildBundlePrompt(bundleItems, bundleCategory || "items", bundleSizeLabel || "");
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-5",
+          max_tokens: 600,
+          messages: [{ role: "user", content: [{ type: "text", text: promptText }] }],
+        }),
+      });
+      if (!response.ok) {
+        const detail = await response.text();
+        console.error("Anthropic API error (bundle):", response.status, detail);
+        let reason = detail.slice(0, 200);
+        try {
+          reason = JSON.parse(detail)?.error?.message || reason;
+        } catch {}
+        return res.status(502).json({ error: `AI request failed (Anthropic HTTP ${response.status}: ${reason})` });
+      }
+      const data = await response.json();
+      const text = (data.content || []).map((b) => b.text || "").join("\n").trim();
+      let result;
+      try {
+        result = extractJson(text);
+      } catch (parseErr) {
+        console.error("Bundle JSON extraction failed. Raw text:", text);
+        return res.status(502).json({ error: parseErr.message });
+      }
+      return res.status(200).json(result);
+    } catch (err) {
+      console.error("Bundle analyze route failed:", err);
+      return res.status(500).json({ error: "Internal error writing bundle listing" });
+    }
+  }
+
   if (!Array.isArray(photos) || photos.length === 0) {
     return res.status(400).json({ error: "No photos provided" });
   }
