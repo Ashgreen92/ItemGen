@@ -1,3942 +1,466 @@
-import { useState, useEffect, useCallback, useRef } from "react";
-import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download, Settings as SettingsIcon, Menu, RotateCw, RotateCcw } from "lucide-react";
-import { supabase } from "../lib/supabaseClient";
+const QUICK_PROMPT = `Look at these photos of a single secondhand item. Answer ONLY with a JSON object, no markdown fences, no commentary:
 
-const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra 1", "Extra 2", "Extra 3"];
-const PHOTO_BUCKET = "item-photos";
+{
+  "size_applicable": true or false. True only if this is clothing or footwear where a size is a normal, expected listing detail. False for anything else (electronics, homeware, toys, accessories, etc.),
+  "size": "the exact size if you can read it on a visible label/tag in the photos, else null. Only fill this in if actually legible - never guess.",
+  "search_query": "a short, accurate eBay search phrase for this item - brand + item type + any distinguishing detail visible (e.g. 'Nike Air Max 90 trainers mens', 'Emporio Armani navy t-shirt'). No fluff, no size/condition words, just what a buyer would type to find this item."
+}`;
 
-// Bump this on every meaningful change to index.js/analyze.js and mention
-// the new number when sending updated files - lets you glance at Settings
-// and know exactly what's actually deployed versus what's been sent but not
-// copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v7";
+function buildFullPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings) {
+  const cf = confirmedFields || {};
+  let factsNote = "";
+  const lines = [];
+  if (cf.size) lines.push(`Size: ${cf.size}`);
+  if (cf.category) lines.push(`Category/item type: ${cf.category}`);
+  if (cf.condition) lines.push(`Condition: ${cf.condition}`);
+  if (cf.brand) lines.push(`Brand: ${cf.brand}`);
+  if (lines.length) {
+    factsNote = `\n\nThe seller has personally corrected/confirmed the following - treat these as verified fact, not something to guess or second-guess, and write the titles/description consistent with them:\n- ${lines.join("\n- ")}`;
+  }
 
-// ---------- storage helpers ----------
+  const totalNote = ebayTotalListings != null
+    ? ` eBay reports approximately ${ebayTotalListings} total active listings currently matching this search - a high number suggests a competitive/saturated market, a low number suggests this is a more niche item; factor this into your demand read.`
+    : "";
 
-// Uploads a data URL to Supabase Storage and returns its public URL.
-// This is what actually fixes the egress problem: a Storage URL can be
-// cached by the browser, so viewing the same photo again later costs
-// nothing, unlike a base64 blob embedded straight in a database row.
-async function uploadPhotoToStorage(dataUrl, path) {
-  const blob = await (await fetch(dataUrl)).blob();
-  const { error } = await supabase.storage.from(PHOTO_BUCKET).upload(path, blob, {
-    contentType: "image/jpeg",
-    upsert: true,
-  });
-  if (error) throw error;
-  const { data } = supabase.storage.from(PHOTO_BUCKET).getPublicUrl(path);
-  return data.publicUrl;
+  const pricingStep = ebayListingsBlock
+    ? `Step 2: Below are REAL current eBay UK active listings for this item, retrieved directly from eBay's own API (not a web search) - genuine, live listings, each tagged with an id like [L1]:
+
+${ebayListingsBlock}
+
+For EVERY listing above, judge how well it actually matches THIS exact item (from the photos), using this hierarchy in order of importance: brand -> exact product/model -> garment type -> gender -> size -> condition -> colour/style. Classify each into exactly one tier:
+- "strong": same brand, same or equivalent product line/model, same garment type, matching gender, a compatible size, and broadly comparable condition - a genuine like-for-like comparable you'd expect to sell for a similar price to this exact item
+- "weak": same general category but meaningfully different in one of the above (different brand, notably different model, wrong size bracket, or a much different condition) - informative but not a tight match
+- "reject": wrong brand, wrong garment type, wrong gender, a bundle/lot listing, an accessory rather than the item itself, or otherwise not a real comparable
+
+Exception to the hierarchy above: if the item carries a licensed character or franchise print/graphic (Disney, Sonic, sports kits, band merch, etc.), treat the specific print/graphic design as close to brand-level importance, not as a minor colour/style detail - a different colourway with a different graphic is effectively a different product, even from the same brand and licence, and should not be scored "strong" just because the brand and character license match. Plain, non-licensed clothing is unaffected - colour/style stays a low-priority factor there as before.
+
+Be strict, not generous - reserve "strong" for genuine matches. Report your tier for every single listing id shown above (even the ones you reject) as a single compact string in ebay_comparable_scores, formatted exactly like "L1:strong,L2:weak,L3:reject,L4:strong" - comma separated, no spaces, one entry per id. Still fill in estimated_price_low/estimated_price_high with your own best-judgement price range as a fallback, in case too few strong matches turn up.${totalNote}
+
+You also have exactly ONE web search available - use it specifically to check Vinted UK for what this item goes for there, since Vinted has no API. Also use whatever you see (in the eBay data above and your Vinted search) to judge demand: many results / recent activity = high demand, few or stale results = low demand.`
+    : `Step 2: You have exactly ONE web search available - use it wisely. Search eBay UK and/or Vinted for comparable items (same or similar brand/model/condition) to see what they're actually selling for right now, on BOTH platforms if your search results cover both. Prioritize sold/completed listings over active asking prices — active listings on both platforms are consistently priced above what items actually sell for, since sellers list high and negotiate down or wait for offers. If your search only turns up active asking prices, treat those as a ceiling, not a target: price toward the lower third of that range rather than the middle or top. Do not guess any price from memory — base it on what you find in search, and err conservative rather than optimistic. Also note roughly how much genuine buyer interest/turnover you saw for this kind of item (many recent sold listings = high demand; mostly old unsold active listings = low demand) - this feeds the "demand" field below.`;
+
+  return `You are helping a UK reseller create a marketplace listing from photos of a single secondhand item. The photos follow this order where present: front, then back, then a label/tag close-up, then a condition/flaw detail, then an extra shot. The label/tag close-up, if present, is deliberately a close-up of any label or tag — treat it as your primary source for material and model information; read it carefully rather than guessing from the garment's general appearance.
+
+Step 1: Identify only what you can directly observe. Visible brand logos, colours, and anything legible on a tag or printed on the item itself count as observed. An exact product line name, material composition, or model number does NOT count as observed unless you can actually read it on a visible label/tag in the photos — do not fill these in from a guess at what "looks like" a typical product of that brand.${factsNote}
+
+${pricingStep}
+
+Step 3: Respond with ONLY a JSON object as your final message, no markdown fences, no commentary before or after it, in exactly this shape:
+
+{
+  "title": "the eBay-optimised title, under 80 characters, KEYWORD-DENSE since eBay search matches on title keywords. Only state details you actually observed per Step 1${lines.length ? " (the seller-confirmed facts above may be included)" : ""} — if you're not sure of the exact product line/model, use a generic accurate description instead (e.g. 'Men's Navy T-Shirt' not a specific product line you can't confirm). Order the keywords: Brand -> Gender -> Colour -> Style/material keywords -> Garment type -> Notable feature -> Size — e.g. 'Nike Mens Black Fleece Zip Hoodie Jacket Large'. Only include an element in that order if it's actually known/observed; skip any you don't have rather than leaving a gap. If a tag/label is visible in the photos and its RRP or original price is actually legible on it, AND the item is New with tags, include it near the end of the title as 'RRP £X' to make the bargain obvious - but only ever if genuinely readable, never estimated or guessed, and only if it still fits within the 80-character limit alongside everything else. Skip it entirely rather than guess or truncate other important info to fit it in",
+  "vintedTitle": "a SEPARATE, short, natural, clean Vinted-style title for the same item - NOT keyword-stuffed like the eBay title above. Vinted buyers browse and filter by brand/size/condition through Vinted's own structured filters, so cramming keywords into the title just reads as spammy there. Write it the way a normal seller would naturally title a Vinted listing, e.g. 'Nike black zip hoodie' or 'Vintage Levi's denim jacket' - a few natural words, same underlying facts as the eBay title (only what was actually observed per Step 1), but phrased conversationally rather than as a keyword list",
+  "description": "2-4 sentence listing description containing ONLY visually confirmed positive descriptive facts${lines.length ? " plus the seller-confirmed facts above" : ""} - brand, style, colour, material, design details. Write it the way a person selling the item would write it - state facts plainly (e.g. 'Size 18½. Polyester-cotton blend.') Never narrate how you know something (no phrases like 'tag confirms', 'as shown in photos', 'visible in the images', 'label indicates', 'seller confirmed') - that reads as an AI wrote it, not a seller. NEVER state what ISN'T visible or wasn't included (no 'no label visible', 'no size tag shown', 'material unknown', etc.). DO NOT mention wear, flaws, stains, damage, fading, or any condition issues in the description at all, even if something looks visibly worn or damaged - the seller reviews every item in hand and adds any real flaws themselves; guessing at flaws from photos has repeatedly been wrong. Keep the description purely descriptive, not evaluative. Anything uncertain about the item's core identity still goes in verify_before_listing, just not condition commentary",
+  "category": "the MOST SPECIFIC real resale subcategory available, not a broad umbrella term - e.g. 'Men's Zip-Up Hoodies' rather than just 'Men's Hoodies & Sweatshirts', 'Women's Skinny Jeans' rather than just 'Women's Jeans'. Being specific here matters for more than just discoverability - a vague category also skews comparable-pricing accuracy, since broader categories pull in a wider, less comparable spread of eBay listings when matching prices. Still only state a specific subcategory if the photos genuinely support it - fall back to the safest accurate broader label rather than guess a specific one you can't confirm.${cf.category ? " The seller has already confirmed this is: " + cf.category + " - use that exact value." : " Be careful with garment TYPE specifically (top vs dress vs jumpsuit vs romper etc.) - only state a specific type if the photos clearly show the item's full length/silhouette. If you can't see enough of the garment to be sure whether it's cropped, full-length, one-piece, etc., use the safest/most generic accurate label and add a note to verify_before_listing rather than confidently asserting the wrong type"}",
+  "condition": "one of: New with tags, New without tags, Excellent, Good, Fair, Well worn. Judge condition on genuine wear/damage only - intentional design fading/distressing (stone-wash, acid-wash, factory-distressed denim, etc.) is not a flaw and shouldn't by itself lower the rating below Excellent/Good if the item is otherwise in good order${cf.condition ? " (seller has confirmed: " + cf.condition + " - use that)" : ""}",
+  "brand": "brand name if visible, else empty string${cf.brand ? " (seller has confirmed: " + cf.brand + " - use that)" : ""}",
+  "estimated_price_low": number (GBP, no symbol),
+  "estimated_price_high": number (GBP, no symbol),
+  "ebay_comparable_scores": "${ebayListingsBlock ? "compact string like L1:strong,L2:weak,L3:reject - one entry per eBay listing id shown above, comma separated, no spaces, required" : "omit this field entirely, no eBay listings were shown this time"}",
+  "vinted_price_low": number (GBP, no symbol - what similar items actually go for specifically on Vinted),
+  "vinted_price_high": number (GBP, no symbol),
+  "demand": "high, medium, or low",
+  "listing_recommendation": "one short sentence of practical advice, e.g. 'List on eBay first, strong demand' or 'Low value and low demand - consider listing directly on Vinted at a low price rather than eBay' or 'Similar value on both platforms - either works'",
+  "confidence": "high, medium, or low - your confidence in the identification AND the price data",
+  "verify_before_listing": ["a list of specific things the seller should personally check before publishing because they were NOT confirmable from the photos - e.g. 'Fabric composition - no care tag visible'. Leave as an empty array only if everything material was genuinely visible and confirmed."],
+  "notes": "state what real eBay data / search you used and what you found. If you could not find good comparables, say so plainly and set confidence to low."
 }
 
-// The AI pipeline and size-limit compression both need actual image data
-// (base64), not a URL - this fetches a Storage URL back into a data URL
-// only at the moment it's actually needed for processing.
-async function urlToDataUrl(url) {
-  if (url.startsWith("data:")) return url; // already a data URL (legacy/unmigrated item)
-  const blob = await (await fetch(url)).blob();
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error("Could not read photo from storage"));
-    reader.readAsDataURL(blob);
-  });
+Never invent a price, material, or product line. Anything you didn't actually see clearly goes in verify_before_listing, not into the titles or description as stated fact.`;
 }
 
-// ---------- image helpers ----------
+// Bundle listings are text-only - no photos, just the titles/sizes of the
+// items already in stock (each one already has an AI-written listing title
+// from when it was first catalogued, so there's plenty to work with without
+// needing another look at the photos).
+function buildBundlePrompt(items, category, sizeLabel, pricing) {
+  const itemLines = items.map((it, i) => `${i + 1}. ${it.title}${it.size ? ` (labelled size ${it.size})` : ""}`).join("\n");
+  const pricingNote =
+    pricing && pricing.combinedValue != null && pricing.suggestedPrice != null
+      ? `\n\nPricing (computed, not estimated by you - state these exact figures, never recalculate or round differently): buying these ${items.length} items separately would come to about £${pricing.combinedValue}; the suggested bundle price is £${pricing.suggestedPrice}, a saving of £${pricing.savings}. Work this into the description as a concrete selling point (e.g. mention the bundle price and/or the saving) - a real number that shows the buyer they're getting a deal is one of the strongest reasons to buy a bundle over single items.`
+      : "\n\nNo price data available for this bundle - do not mention a price, saving, or value figure anywhere, since none has been computed.";
+  return `You are writing a Vinted bundle listing for a UK reseller, optimised to actually sell - not just describe the items, but give a buyer a real reason to buy all of them together rather than none of them.
 
-// This used to read the JPEG's EXIF orientation tag and manually rotate the
-// canvas to match, because canvas.toDataURL() historically stripped that
-// orientation instruction. Modern mobile browsers (Safari and Chrome on the
-// phones this app actually runs on) now apply EXIF orientation themselves
-// when decoding a photo into an <img>, so img.width/img.height and whatever
-// drawImage() paints below are already right-way-up. Rotating again on top
-// of that was a DOUBLE rotation - which is exactly why every photo was
-// consistently coming out needing the same manual correction. Trusting the
-// browser's own orientation handling and just resizing/compressing fixes it.
-async function compressImage(file, maxWidth, quality) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onload = () => {
-        let drawW = img.width, drawH = img.height;
-        if (drawW > maxWidth) {
-          drawH = Math.round(drawH * (maxWidth / drawW));
-          drawW = maxWidth;
-        }
-        const canvas = document.createElement("canvas");
-        canvas.width = drawW;
-        canvas.height = drawH;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, drawW, drawH);
-        resolve(canvas.toDataURL("image/jpeg", quality));
-      };
-      img.onerror = () => reject(new Error("Could not read image"));
-      img.src = e.target.result;
-    };
-    reader.onerror = () => reject(new Error("Could not read file"));
-    reader.readAsDataURL(file);
-  });
+This bundle contains ${items.length} items, all the same category and a matching size, being sold together as one listing.
+
+Items in this bundle:
+${itemLines}
+
+Category: ${category}
+Size group: ${sizeLabel}${pricingNote}
+
+Write a short, natural Vinted-style bundle title and description, ready to paste straight into a Vinted listing:
+- The title should read the way a real seller would title a bundle - short and natural, not keyword-stuffed (Vinted buyers filter through Vinted's own structured filters, not title keywords) - e.g. "Bundle of 5 women's jumpers size M".
+- Open the description with what the buyer gets and why it's a good deal, then list out what's included so a buyer knows exactly what they're getting - condense/rephrase the item names above naturally into a readable list or short sentences, don't just dump the raw titles verbatim.
+- Mention the shared size (${sizeLabel}) once, near the top.
+- If it's genuinely true from the item names, a brief line on why these particular items work well together (matching style, versatile basics, ideal wardrobe refresh, popular size) can help - but only state something you can actually see in the names above, never invent a theme that isn't there.
+- Close with a short, natural nudge to buy as a bundle - postage is cheaper per item bought together, and/or the saving mentioned above if pricing was given. Keep it low-key, not pushy or salesy-sounding.
+- Friendly, natural reseller tone - like a person actually wrote it, not an AI. No phrases like "as listed above" or "as shown".
+- Do NOT mention condition, flaws, or wear - the seller adds that themselves. Do NOT invent any fact (brand, material, colour, price) that isn't already given above.
+
+Respond with ONLY a JSON object, no markdown fences, no commentary:
+{
+  "title": "short natural bundle title",
+  "description": "3-5 sentence description that sells the bundle - what's included, the size, why buy together, ready to paste straight into a Vinted listing"
+}`;
 }
 
-function resizeDataUrl(dataUrl, maxWidth, quality) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous"; // needed to read pixel data back off a Storage URL, no-op for data: URLs
-    img.onload = () => {
-      let w = img.width, h = img.height;
-      if (w > maxWidth) {
-        h = Math.round(h * (maxWidth / w));
-        w = maxWidth;
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext("2d");
-      ctx.drawImage(img, 0, 0, w, h);
-      resolve(canvas.toDataURL("image/jpeg", quality));
-    };
-    img.onerror = () => reject(new Error("Could not resize image"));
-    img.src = dataUrl;
-  });
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: "4mb",
+    },
+  },
+};
+
+function extractJson(text) {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1) {
+    throw new Error(`No JSON found in AI response. Got: "${text.slice(0, 200) || "(empty response)"}"`);
+  }
+  return JSON.parse(text.slice(start, end + 1));
 }
 
-// Manual 90-degree rotation, for photos auto-rotate had no EXIF data to work
-// with (anything captured before that feature existed, or missing EXIF
-// entirely). direction is "cw" or "ccw".
-function rotateDataUrl(dataUrl, direction = "cw", quality = 0.9) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = img.height;
-      canvas.height = img.width;
-      const ctx = canvas.getContext("2d");
-      ctx.translate(canvas.width / 2, canvas.height / 2);
-      ctx.rotate((direction === "ccw" ? -1 : 1) * (Math.PI / 2));
-      ctx.drawImage(img, -img.width / 2, -img.height / 2);
-      resolve(canvas.toDataURL("image/jpeg", quality));
-    };
-    img.onerror = () => reject(new Error("Could not rotate image"));
-    img.src = dataUrl;
-  });
+// ---------- pricing math (deterministic, not left to the model) ----------
+
+function percentile(sortedNums, p) {
+  if (sortedNums.length === 0) return null;
+  if (sortedNums.length === 1) return sortedNums[0];
+  const idx = (p / 100) * (sortedNums.length - 1);
+  const lower = Math.floor(idx);
+  const upper = Math.ceil(idx);
+  if (lower === upper) return sortedNums[lower];
+  const weight = idx - lower;
+  return sortedNums[lower] * (1 - weight) + sortedNums[upper] * weight;
 }
 
-// Gentle automatic photo correction - white balance + exposure/contrast.
-// Deliberately blended (not full-strength) so it improves lighting without
-// distorting the item's true colour or hiding flaws. Fails safe: if anything
-// goes wrong, returns the original photo untouched rather than breaking capture.
-function autoEnhance(dataUrl) {
-  return new Promise((resolve) => {
-    try {
-      const img = new Image();
-      img.onload = () => {
-        try {
-          const canvas = document.createElement("canvas");
-          canvas.width = img.width;
-          canvas.height = img.height;
-          const ctx = canvas.getContext("2d");
-          ctx.drawImage(img, 0, 0);
-          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          const data = imageData.data;
+function roundToNiceEnding(value) {
+  if (value == null) return null;
+  return Math.round(value * 2) / 2; // nearest 50p
+}
 
-          // Sample the photo to find its actual average brightness first - a
-          // flat boost applied to every photo regardless over-brightened
-          // already well-lit shots into clipping, and clipping DOES distort
-          // colour (a pink jumper pushed toward beige) even though a flat
-          // multiply can't shift hue when nothing's clipping.
-          let sum = 0, sampled = 0;
-          for (let i = 0; i < data.length; i += 40) { // every ~10th pixel, for speed
-            sum += (data[i] + data[i + 1] + data[i + 2]) / 3;
-            sampled++;
-          }
-          const meanBrightness = sampled > 0 ? sum / sampled : 128;
+// Builds the actual price recommendation from only the "strong" comparables
+// the model identified - median as the headline number, a range from the
+// spread of strong matches (min/max for a tiny sample, 25th-75th percentile
+// once there's enough to make that meaningful), and a confidence tied
+// directly to how many strong matches there actually were.
+function computeComparablePricing(ebayResults, comparableScoresStr) {
+  if (!Array.isArray(ebayResults) || ebayResults.length === 0) return null;
+  if (typeof comparableScoresStr !== "string" || !comparableScoresStr.trim()) return null;
 
-          // Only genuinely dim photos get the full boost - well-lit ones get
-          // little or none, so they're never pushed into clipping/washed-out
-          // territory. Never darkens an already-bright shot, only tapers off
-          // how much brightening happens as the photo gets brighter.
-          const targetMean = 150;
-          const brightnessBoost = Math.min(1.12, Math.max(1.0, targetMean / meanBrightness));
-          for (let i = 0; i < data.length; i += 4) {
-            data[i] = Math.min(255, data[i] * brightnessBoost);
-            data[i + 1] = Math.min(255, data[i + 1] * brightnessBoost);
-            data[i + 2] = Math.min(255, data[i + 2] * brightnessBoost);
-          }
+  const priceById = new Map(
+    ebayResults.filter((r) => typeof r.priceValue === "number" && !isNaN(r.priceValue)).map((r) => [r.id, r.priceValue])
+  );
+  const strongPrices = comparableScoresStr
+    .split(",")
+    .map((pair) => pair.trim().split(":"))
+    .filter(([id, tier]) => id && tier && tier.trim().toLowerCase() === "strong")
+    .map(([id]) => priceById.get(id.trim()))
+    .filter((p) => typeof p === "number" && !isNaN(p))
+    .sort((a, b) => a - b);
 
-          ctx.putImageData(imageData, 0, 0);
-          resolve({ url: canvas.toDataURL("image/jpeg", 0.85), enhanced: brightnessBoost > 1.01 });
-        } catch (err) {
-          console.error("Photo enhancement failed, using original:", err);
-          resolve({ url: dataUrl, enhanced: false });
-        }
-      };
-      img.onerror = () => resolve({ url: dataUrl, enhanced: false });
-      img.src = dataUrl;
-    } catch (err) {
-      resolve({ url: dataUrl, enhanced: false });
+  if (strongPrices.length === 0) {
+    return { comparable_count: 0, price_confidence: "Low" };
+  }
+
+  const median = percentile(strongPrices, 50);
+  const useMinMax = strongPrices.length < 4;
+  const low = useMinMax ? strongPrices[0] : percentile(strongPrices, 25);
+  const high = useMinMax ? strongPrices[strongPrices.length - 1] : percentile(strongPrices, 75);
+
+  return {
+    price_low: Math.round(low),
+    price_high: Math.round(high),
+    recommended_price: roundToNiceEnding(median),
+    comparable_count: strongPrices.length,
+    price_confidence: strongPrices.length >= 6 ? "High" : strongPrices.length >= 3 ? "Medium" : "Low",
+  };
+}
+
+// ---------- eBay Browse API ----------
+
+let cachedEbayToken = null;
+let cachedEbayTokenExpiry = 0;
+
+async function getEbayToken() {
+  if (cachedEbayToken && Date.now() < cachedEbayTokenExpiry) {
+    return cachedEbayToken;
+  }
+
+  const clientId = process.env.EBAY_CLIENT_ID;
+  const clientSecret = process.env.EBAY_CLIENT_SECRET;
+  if (!clientId || !clientSecret) return null;
+
+  const creds = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+  const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Authorization: `Basic ${creds}`,
+    },
+    body: "grant_type=client_credentials&scope=https://api.ebay.com/oauth/api_scope",
+  });
+  if (!res.ok) {
+    console.error("eBay token request failed:", await res.text());
+    return null;
+  }
+  const data = await res.json();
+  if (!data.access_token) return null;
+
+  cachedEbayToken = data.access_token;
+  // expires_in is in seconds; refresh a bit early to be safe
+  cachedEbayTokenExpiry = Date.now() + (data.expires_in || 7200) * 1000 - 60000;
+  return cachedEbayToken;
+}
+
+async function searchEbay(query, token) {
+  const url = `https://api.ebay.com/buy/browse/v1/item_summary/search?q=${encodeURIComponent(query)}&limit=25`;
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB",
+    },
+  });
+  if (!res.ok) {
+    console.error("eBay search failed:", await res.text());
+    return { results: [], total: null };
+  }
+  const data = await res.json();
+  const results = (data.itemSummaries || []).map((item, i) => ({
+    id: `L${i + 1}`,
+    title: item.title,
+    priceValue: item.price ? Number(item.price.value) : null,
+    price: item.price ? `£${item.price.value}` : "?",
+    condition: item.condition || "unknown",
+  }));
+  return { results, total: typeof data.total === "number" ? data.total : null };
+}
+
+async function getEbayMarketData(query) {
+  try {
+    const token = await getEbayToken();
+    if (!token) return { block: null, total: null, results: [] };
+    const { results, total } = await searchEbay(query, token);
+    if (results.length === 0) return { block: null, total, results: [] };
+    const block = results.map((r) => `- [${r.id}] "${r.title}" - ${r.price} (${r.condition})`).join("\n");
+    return { block, total, results };
+  } catch (err) {
+    console.error("eBay Browse API lookup failed:", err);
+    return { block: null, total: null, results: [] };
+  }
+}
+
+// ---------- handler ----------
+
+export default async function handler(req, res) {
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: "Server is missing ANTHROPIC_API_KEY" });
+  }
+
+  const { photos, mode, confirmedFields, ebaySearchQuery, bundleItems, bundleCategory, bundleSizeLabel, bundlePricing } = req.body || {};
+
+  if (mode === "bundle") {
+    if (!Array.isArray(bundleItems) || bundleItems.length < 2) {
+      return res.status(400).json({ error: "Need at least 2 items to write a bundle listing" });
     }
-  });
-}
-
-function estimateBytes(dataUrl) {
-  // This measures the size of the text actually sent over the wire (as JSON),
-  // not decoded binary size - no base64 conversion factor needed here.
-  return dataUrl.length;
-}
-
-// Photos are almost always public Supabase Storage URLs by this point (see
-// uploadPhotoToStorage) - analyze.js now hands those straight to Anthropic
-// as URL image sources, so Anthropic's own servers fetch the full-res
-// original directly from Storage. This function used to defeat that by
-// re-fetching every photo here, converting it back to base64, and - if the
-// combined batch exceeded a few MB - aggressively downscaling everything to
-// as little as 250px wide at 25% quality just so the whole thing could be
-// crammed into the POST body under Vercel's hard 4.5MB request-body limit.
-// That was very likely why genuinely-legible sizes on label photos were
-// coming back blank - the AI was seeing a much softer image than what was
-// actually captured. Storage URLs now pass through completely untouched.
-// The only photos that still need to travel inside the request body (and
-// so still need this compression) are legacy raw base64 data URLs from
-// items captured before the Storage migration.
-async function ensureUnderSizeLimit(photos, maxTotalBytes = 3200000) {
-  const legacyIndices = [];
-  photos.forEach((p, i) => {
-    if (typeof p === "string" && p.startsWith("data:")) legacyIndices.push(i);
-  });
-  if (legacyIndices.length === 0) return photos;
-
-  let legacyPhotos = legacyIndices.map((i) => photos[i]);
-  let quality = 0.5;
-  let width = 700;
-  for (let attempt = 0; attempt < 7; attempt++) {
-    const totalBytes = legacyPhotos.reduce((sum, p) => sum + estimateBytes(p), 0);
-    if (totalBytes <= maxTotalBytes) break;
-    legacyPhotos = await Promise.all(
-      legacyPhotos.map((p) => resizeDataUrl(p, width, quality))
-    );
-    quality = Math.max(0.25, quality - 0.05);
-    width = Math.max(250, Math.round(width * 0.8));
-  }
-  const finalBytes = legacyPhotos.reduce((sum, p) => sum + estimateBytes(p), 0);
-  if (finalBytes > maxTotalBytes) {
-    throw new Error(
-      `Photos still ${(finalBytes / 1000000).toFixed(1)}MB after compression (${legacyPhotos.length} photos, limit ${(maxTotalBytes / 1000000).toFixed(1)}MB)`
-    );
-  }
-
-  const result = [...photos];
-  legacyIndices.forEach((origIdx, j) => {
-    result[origIdx] = legacyPhotos[j];
-  });
-  return result;
-}
-
-async function analyzeItem(photos, mode, confirmedFields, ebaySearchQuery) {
-  const bodyStr = JSON.stringify({ photos, mode, confirmedFields, ebaySearchQuery });
-  const res = await fetch("/api/analyze", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: bodyStr,
-  });
-  if (!res.ok) {
-    let detail = "AI request failed";
     try {
-      const body = await res.json();
-      detail = body.error || detail;
-    } catch {}
-    const sentMB = (bodyStr.length / 1000000).toFixed(2);
-    throw new Error(`${detail} (HTTP ${res.status}, sent ${sentMB}MB, ${photos.length} photos)`);
-  }
-  return res.json();
-}
-
-// Combined individual value + a suggested discounted bundle price - a real
-// number is a much stronger selling point than vague copy, but only worth
-// showing when every item in the group actually has a price estimate;
-// otherwise a partial total would misrepresent the bundle's value, so it's
-// skipped entirely rather than shown as a guess.
-function computeBundlePricing(items) {
-  if (!items.length || items.some((e) => e.recommended_price == null)) return null;
-  const combinedValue = items.reduce((sum, e) => sum + Number(e.recommended_price), 0);
-  if (!(combinedValue > 0)) return null;
-  // 15% off buying the items separately - a standard bundle incentive -
-  // rounded to the nearest 50p like the rest of the app's pricing.
-  const suggestedPrice = Math.round(combinedValue * 0.85 * 2) / 2;
-  return { combinedValue: Math.round(combinedValue * 2) / 2, suggestedPrice, savings: Math.round((combinedValue - suggestedPrice) * 2) / 2 };
-}
-
-// Text-only - no photos needed, just each item's already-written listing
-// title/size, so this is quick and cheap compared to the per-item AI pass.
-// bundlePricing (combinedValue/suggestedPrice) is optional - only passed
-// when every item in the group has a recommended_price, so the AI never has
-// to invent or half-guess a number.
-async function analyzeBundle(bundleItems, bundleCategory, bundleSizeLabel, bundlePricing) {
-  const res = await fetch("/api/analyze", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode: "bundle", bundleItems, bundleCategory, bundleSizeLabel, bundlePricing }),
-  });
-  if (!res.ok) {
-    let detail = "AI request failed";
-    try {
-      const body = await res.json();
-      detail = body.error || detail;
-    } catch {}
-    throw new Error(`${detail} (HTTP ${res.status})`);
-  }
-  return res.json();
-}
-
-// ---------- UI bits ----------
-
-function SunflowerIcon({ size = 16, className = "" }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" className={className}>
-      {Array.from({ length: 8 }).map((_, i) => (
-        <ellipse key={i} cx="12" cy="5.2" rx="2.1" ry="4.4" fill="currentColor" opacity="0.88" transform={`rotate(${i * 45} 12 12)`} />
-      ))}
-      <circle cx="12" cy="12" r="3.1" fill="#5C3A1E" />
-    </svg>
-  );
-}
-
-function BackgroundSunflower() {
-  const outerAngles = Array.from({ length: 15 }, (_, i) => i * 24);
-  const innerAngles = Array.from({ length: 10 }, (_, i) => i * 36 + 12);
-  return (
-    <svg
-      viewBox="0 0 400 400"
-      className="fixed bottom-0 right-0 pointer-events-none select-none"
-      style={{ width: "min(60vw, 480px)", height: "auto", zIndex: 0 }}
-      aria-hidden="true"
-    >
-      <g transform="translate(400,400)">
-        <g opacity="0.16">
-          {outerAngles.map((a) => (
-            <ellipse key={a} cx="0" cy="-160" rx="42" ry="95" fill="#C98A2C" transform={`rotate(${a})`} />
-          ))}
-        </g>
-        <g opacity="0.22">
-          {innerAngles.map((a) => (
-            <ellipse key={a} cx="0" cy="-160" rx="30" ry="68" fill="#A9822E" transform={`rotate(${a})`} />
-          ))}
-        </g>
-        <circle cx="0" cy="-160" r="46" fill="#6B4A1E" opacity="0.24" />
-        <circle cx="0" cy="-160" r="46" fill="none" stroke="#5C3A1E" strokeWidth="0.5" opacity="0.2" />
-      </g>
-    </svg>
-  );
-}
-
-// Item Status colour categories. Deliberately solid/saturated (not faint
-// tints) so each category reads clearly at a glance across Stock and Item
-// Status. "both" (eBay + Vinted) gets its own colour rather than reusing
-// either single-platform colour, so it's never mistaken for just one of them.
-const CATEGORY_STYLES = {
-  unlisted: { label: "Unlisted", solid: "bg-[#6B6250] text-white", tint: "bg-[#6B6250]/15 border-[#6B6250]/40", fillMedium: "bg-[#6B6250]/35 border-[#6B6250]", text: "text-[#6B6250]", accent: "border-l-[#6B6250]" },
-  ebay: { label: "Listed on eBay", solid: "bg-[#3B6E91] text-white", tint: "bg-[#3B6E91]/15 border-[#3B6E91]/40", fillMedium: "bg-[#3B6E91]/35 border-[#3B6E91]", text: "text-[#3B6E91]", accent: "border-l-[#3B6E91]" },
-  vinted: { label: "Listed on Vinted", solid: "bg-[#7A5980] text-white", tint: "bg-[#7A5980]/15 border-[#7A5980]/40", fillMedium: "bg-[#7A5980]/35 border-[#7A5980]", text: "text-[#7A5980]", accent: "border-l-[#7A5980]" },
-  both: { label: "Listed on both", solid: "bg-[#1D7A6E] text-white", tint: "bg-[#1D7A6E]/15 border-[#1D7A6E]/40", fillMedium: "bg-[#1D7A6E]/35 border-[#1D7A6E]", text: "text-[#1D7A6E]", accent: "border-l-[#1D7A6E]" },
-  sold: { label: "Sold", solid: "bg-[#3F5E42] text-white", tint: "bg-[#3F5E42]/15 border-[#3F5E42]/40", fillMedium: "bg-[#3F5E42]/35 border-[#3F5E42]", text: "text-[#3F5E42]", accent: "border-l-[#3F5E42]" },
-  ready_for_posting: { label: "Ready for posting", solid: "bg-[#A63A2E] text-white", tint: "bg-[#A63A2E]/15 border-[#A63A2E]/40", fillMedium: "bg-[#A63A2E]/35 border-[#A63A2E]", text: "text-[#A63A2E]", accent: "border-l-[#A63A2E]" },
-};
-
-// Works out which colour category an item belongs in. Active items are
-// judged purely on the eBay/Vinted booleans (Depop still shown as a small
-// chip elsewhere but doesn't get its own main colour yet). Sold items go
-// straight to "ready for posting" the moment they're marked sold - no
-// separate payment-due gate - until the posted step is confirmed. A partial
-// sale on a quantity>1 item (status still "ready", one unit sold and
-// unposted while the rest stays listed) gets the same "ready for posting"
-// treatment, checked first so it isn't missed just because the item as a
-// whole isn't fully sold out yet.
-function getListingCategory(item) {
-  if (needsPosting(item)) return "ready_for_posting";
-  if (item.status === "sold") return "sold";
-  if (item.status !== "ready") return null;
-  const onEbay = !!item.ebay_listed;
-  const onVinted = !!item.vinted_listed;
-  if (onEbay && onVinted) return "both";
-  if (onEbay) return "ebay";
-  if (onVinted) return "vinted";
-  return "unlisted";
-}
-
-function StatusBadge({ item }) {
-  const status = item.status;
-  const map = {
-    processing: { label: "Processing", cls: "bg-[#A9822E] text-white" },
-    needs_size: { label: "Needs size", cls: "bg-[#A63A2E] text-white" },
-    error: { label: "Failed", cls: "bg-[#A63A2E] text-white" },
-  };
-
-  if (status === "sold" || status === "ready") {
-    const category = getListingCategory(item);
-    const style = CATEGORY_STYLES[category] || CATEGORY_STYLES.unlisted;
-    return (
-      <span className={`inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm ${style.solid}`}>
-        {style.label}
-      </span>
-    );
-  }
-
-  const s = map[status] || map.processing;
-  return (
-    <span className={`inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm ${s.cls}`}>
-      {status === "processing" && <Loader2 size={11} className="animate-spin" />}
-      {s.label}
-    </span>
-  );
-}
-
-function PriceTag({ low, high }) {
-  if (low == null || high == null) return null;
-  return (
-    <div className="inline-flex items-center gap-1 text-[#A9822E] font-semibold tabular-nums">
-      <Tag size={13} className="shrink-0" />
-      £{low}
-      {high !== low ? `–£${high}` : ""}
-    </div>
-  );
-}
-
-function CopyField({ label, value, charLimit }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(value || "");
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {}
-  };
-  return (
-    <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-3">
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-xs text-[#8A7F63]">{label}</span>
-        <div className="flex items-center gap-2">
-          {charLimit && (
-            <span className={`text-xs tabular-nums ${(value || "").length > charLimit ? "text-[#A63A2E]" : "text-[#8A7F63]"}`}>
-              {(value || "").length}/{charLimit}
-            </span>
-          )}
-          <button
-            onClick={copy}
-            className={`flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-md transition ${
-              copied ? "bg-[#3F5E42]/20 text-[#3F5E42]" : "bg-[#DCD4BC] text-[#2B2620]"
-            }`}
-          >
-            {copied ? <Check size={12} /> : <Copy size={12} />}
-            {copied ? "Copied" : "Copy"}
-          </button>
-        </div>
-      </div>
-      <p className="text-sm text-[#2B2620] whitespace-pre-wrap">{value || "—"}</p>
-    </div>
-  );
-}
-
-// Small inline copy button for editable fields (CopyField above is for
-// read-only display) - used on the bundle title/description so each can be
-// copied separately straight into Vinted's own title/description boxes.
-function InlineCopyButton({ text }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(text || "");
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {}
-  };
-  return (
-    <button
-      type="button"
-      onClick={copy}
-      className={`flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-md transition ${
-        copied ? "bg-[#3F5E42]/20 text-[#3F5E42]" : "bg-[#DCD4BC] text-[#2B2620]"
-      }`}
-    >
-      {copied ? <Check size={12} /> : <Copy size={12} />}
-      {copied ? "Copied" : "Copy"}
-    </button>
-  );
-}
-
-function fmtDate(iso) {
-  if (!iso) return "";
-  return new Date(iso).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
-}
-
-// Ledger-style money formatting: signed=true shows an explicit + or - sign,
-// used anywhere money is moving in or out (revenue in, cost out) rather than
-// just a running total.
-function fmtMoney(amount, { signed = false } = {}) {
-  const v = Number(amount) || 0;
-  const abs = Math.abs(v).toFixed(2);
-  if (!signed || v === 0) return `£${abs}`;
-  return `${v > 0 ? "+" : "-"}£${abs}`;
-}
-
-// Items marked sold before the quantity_sold column existed backfilled to 0
-// when the column was added, silently zeroing their revenue - status "sold"
-// has always meant everything sold, so that's what gets assumed when
-// quantity_sold reads 0 on an already-sold item.
-function effectiveQuantitySold(item) {
-  const qs = Number(item.quantity_sold) || 0;
-  if (qs > 0) return qs;
-  if (item.status === "sold") return Number(item.quantity) || 1;
-  return 0;
-}
-
-// True whenever there's a sale sitting unposted - whether that's the last
-// unit (status flips to "sold") or one unit out of a multi-quantity stock
-// entry (status stays "ready" because the rest is still for sale). Compares
-// the two timestamps directly rather than trusting status alone, so a
-// partial sale on a quantity>1 item still surfaces as "needs posting"
-// instead of silently looking like ordinary unsold stock.
-function needsPosting(item) {
-  if (!item.sold_at) return false;
-  if (!item.posted_at) return true;
-  return new Date(item.sold_at) > new Date(item.posted_at);
-}
-
-function ListedToggles({ item, onToggle }) {
-  const platforms = [
-    { field: "ebay_listed", label: "eBay" },
-    { field: "vinted_listed", label: "Vinted" },
-    { field: "depop_listed", label: "Depop" },
-  ];
-  return (
-    <div className="mb-5">
-      <div className="flex items-center justify-between mb-1.5">
-        <span className="text-xs text-[#8A7F63] uppercase tracking-wide">Listed on</span>
-        {item.created_at && (
-          <span className="text-xs text-[#8A7F63]">Captured {fmtDate(item.created_at)}</span>
-        )}
-      </div>
-      <div className="flex gap-2 flex-wrap">
-        {platforms.map((p) => (
-          <button
-            key={p.field}
-            onClick={() => onToggle(item, p.field)}
-            className={`px-3 py-1.5 rounded-sm text-sm font-medium border transition ${
-              item[p.field]
-                ? "bg-[#3F5E42]/15 border-[#3F5E42]/40 text-[#3F5E42]"
-                : "bg-[#F7F3E8] border-[#C9BFA3] text-[#8A7F63]"
-            }`}
-          >
-            {item[p.field] ? "✓ " : ""}{p.label}
-            {item[p.field] && item[`${p.field}_at`] && (
-              <span className="opacity-70"> · {fmtDate(item[`${p.field}_at`])}</span>
-            )}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-const PIPELINE_STAGES = {
-  not_listed: { label: "Not listed yet" },
-  ebay: { label: "Listed on eBay (0-7 Days)" },
-  vinted: { label: "Listed on Vinted (7-21 Days)" },
-  reduced: { label: "Reduced on Vinted (21-90 Days)" },
-  relist: { label: "Relist (90 Days+)" },
-};
-
-const FLAG_STYLES = {
-  none: { badge: "", card: "bg-[#F7F3E8] border-[#C9BFA3]", accent: "" },
-  orange: { badge: "bg-[#A9822E] text-white", card: "bg-[#A9822E]/35 border-[#A9822E]", accent: "border-l-[#A9822E]" },
-  red: { badge: "bg-[#A63A2E] text-white", card: "bg-[#A63A2E]/35 border-[#A63A2E]", accent: "border-l-[#A63A2E]" },
-};
-
-function daysSince(iso) {
-  if (!iso) return null;
-  return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
-}
-
-// Pulls a gender/age bracket out of the AI-generated category text (e.g.
-// "Men's Jumpers & Cardigans" -> "Men's") so Bundles can filter by it
-// separately from the specific garment type.
-const GENDER_PATTERNS = [
-  { label: "Men's", regex: /\bmen'?s\b/i },
-  { label: "Women's", regex: /\bwomen'?s\b|\bladies'?\b/i },
-  { label: "Boys'", regex: /\bboys?'?\b/i },
-  { label: "Girls'", regex: /\bgirls?'?\b/i },
-  { label: "Kids'", regex: /\bkids'?\b|\bchildren'?s\b|\bunisex\b/i },
-];
-
-function parseGender(category) {
-  if (!category) return null;
-  const match = GENDER_PATTERNS.find((g) => g.regex.test(category));
-  return match ? match.label : null;
-}
-
-// Whatever's left of the category text once the gender bracket is stripped -
-// "Men's Jumpers & Cardigans" -> "Jumpers & Cardigans".
-function parseGarmentType(category) {
-  if (!category) return "";
-  let t = category;
-  GENDER_PATTERNS.forEach((g) => {
-    t = t.replace(g.regex, "");
-  });
-  return t.replace(/^[\s'-]+|[\s'-]+$/g, "").trim() || category.trim();
-}
-
-// Standard UK women's/unisex size chart - approximate, since vintage and
-// brand-to-brand sizing varies. Good enough to catch "12-14" / "M" / "12"
-// being the same, which exact string matching gets completely wrong -
-// not precise enough to trust blindly on older or off-brand stock.
-const UK_SIZE_TO_BUCKET = [
-  { max: 6, bucket: "XS" },
-  { max: 10, bucket: "S" },
-  { max: 14, bucket: "M" },
-  { max: 18, bucket: "L" },
-  { max: 22, bucket: "XL" },
-  { max: 26, bucket: "XXL" },
-];
-// Includes bilingual (French PS/S/SP/L/G/LG) and US plus-size (1X/2X/3X)
-// synonyms found in real stock - built from an actual export of Ashley's
-// stock, not guessed. Single-letter keys (s, m, l, g, p) only ever match a
-// WHOLE token (see resolveToken below), never as a prefix, so they can't
-// accidentally eat part of an unrelated code.
-const LETTER_BUCKET_ALIASES = {
-  xxs: "XS", "extra extra small": "XS", xs: "XS", "extra small": "XS", "x-small": "XS", tp: "XS",
-  s: "S", small: "S", p: "S", petit: "S", petite: "S", sp: "S", ps: "S",
-  m: "M", medium: "M", med: "M",
-  l: "L", large: "L", g: "L", grand: "L", lg: "L",
-  xl: "XL", "extra large": "XL", "x-large": "XL", "1x": "XL", tg: "XL",
-  xxl: "XXL", "extra extra large": "XXL", "2xl": "XXL", "2x": "XXL",
-  xxxl: "XXXL", "3xl": "XXXL", "3x": "XXXL",
-};
-const SIZE_BUCKET_ORDER = ["XS", "S", "M", "L", "XL", "XXL", "XXXL"];
-const DESCRIPTOR_SUFFIX = /^(\d{1,2})\s*[\s-]?(reg|regular|tall|petite|plus|std|standard)$/;
-const GENDER_WORD = /\b(women'?s?|mens?|ladies)\b/g;
-
-// Resolves one size token to { bucket, origin }, or null when nothing
-// matches. origin distinguishes a letter-derived bucket from a
-// numeric-chart one, because a mixed pair ("12-M") needs different handling
-// from a genuine dual-span ("18/20") - see normalizeSize below.
-function resolveSizeToken(tok, skipDressChart) {
-  const t = tok.trim().toLowerCase();
-  if (!t) return null;
-  if (LETTER_BUCKET_ALIASES[t]) return { bucket: LETTER_BUCKET_ALIASES[t], origin: "letter" };
-  // Prefix match for compound codes like "3XLT" (3XL + Tall) or "2XG" -
-  // longest alias first so "3xl" wins over "3x" for "3xlt".
-  const keys = Object.keys(LETTER_BUCKET_ALIASES).sort((a, b) => b.length - a.length);
-  for (const key of keys) {
-    if (key.length >= 2 && t.startsWith(key)) return { bucket: LETTER_BUCKET_ALIASES[key], origin: "letter" };
-  }
-  if (skipDressChart) return null;
-  const m = t.match(/^(?:uk\s*|us\s*)?(\d{1,2})$/);
-  if (!m) return null;
-  const num = Number(m[1]);
-  if (num < 4 || num > 26) return null;
-  const hit = UK_SIZE_TO_BUCKET.find((b) => num <= b.max);
-  return hit ? { bucket: hit.bucket, origin: "numeric" } : null;
-}
-
-// Returns an array of canonical buckets (e.g. ["M"], or ["L","XL"] for a
-// genuine dual-span size like "18/20") when confident, or [rawSize] when
-// not - unrecognised sizes never get force-merged with anything else, they
-// just group with identical-looking labels as before.
-//
-// garmentType matters: trousers/jeans/dungarees use waist inches and
-// footwear uses shoe sizing, both of which overlap the same number range
-// as UK dress sizes but mean something completely different - the
-// dress-size chart must never apply to those. genderLabel (from
-// parseGender) matters too: kids' sizes are ages/heights, not dress sizes,
-// and aren't always spelled with the word "years" (e.g. a Girls' swimsuit
-// labelled just "8").
-function normalizeSize(rawSize, garmentType, genderLabel) {
-  if (!rawSize) return null;
-  let s = rawSize.trim().toLowerCase();
-  s = s.replace(GENDER_WORD, " ").replace(/\s+/g, " ").trim();
-
-  const isKidsCategory = genderLabel === "Boys'" || genderLabel === "Girls'" || genderLabel === "Kids'";
-  const isWaistSized = garmentType && /trouser|jean|pant|legging|short|chino|dungaree|overall/i.test(garmentType);
-  const isShoeSized = garmentType && /boot|trainer|\bshoe|sandal|\bheel|sneaker|wellington|\bwelly|slipper|flip.?flop/i.test(garmentType);
-  const skipDressChart = isWaistSized || isShoeSized;
-
-  // Kids' sizing stays entirely separate from adult letter/numeric sizes -
-  // never bucket these together with the adult chart above.
-  if (isKidsCategory || /\byears?\b|\byrs?\b|\bage\b|\bmonths?\b|\bmos?\b|\binfant\b/.test(s)) {
-    return [`Kids: ${s}`];
-  }
-
-  // Strip a trailing fit descriptor off a bare number, e.g. "42 REG" -> "42".
-  const dm = s.match(DESCRIPTOR_SUFFIX);
-  if (dm) s = dm[1];
-
-  // Waist-sized garments don't map onto the dress chart, but the number is
-  // still worth grouping on - pull it out of the common label shapes
-  // ("26W 32L", "10/30R", bare "34", "US 34") instead of discarding it.
-  if (isWaistSized) {
-    const w =
-      s.match(/^(\d{1,2})\s*w\b/) ||
-      s.match(/^(\d{1,2})\/\d{1,3}r\b/) ||
-      s.match(/^(?:uk\s*|us\s*)?(\d{1,2})$/);
-    if (w) return [`W${w[1]}`];
-  }
-
-  // Whole-string resolve first (covers plain letters/numbers and compound
-  // codes like "2XL").
-  const direct = resolveSizeToken(s, skipDressChart);
-  if (direct) return [direct.bucket];
-
-  // A leading letter-size word ahead of parenthetical/trailing noise, e.g.
-  // "M (8-10)" - brands often state the letter size first.
-  if (!skipDressChart) {
-    const firstTok = s.split(" ")[0];
-    if (firstTok && LETTER_BUCKET_ALIASES[firstTok]) return [LETTER_BUCKET_ALIASES[firstTok]];
-  }
-
-  // Split on "/" or "-" and resolve each side independently, e.g. "18/20",
-  // "S/M", "12-M".
-  if (s.includes("/") || s.includes("-")) {
-    const sides = s.split(/[/-]/).map((x) => x.trim()).filter(Boolean);
-    const resolved = sides.map((x) => resolveSizeToken(x, skipDressChart)).filter(Boolean);
-    if (resolved.length) {
-      const origins = new Set(resolved.map((r) => r.origin));
-      let buckets;
-      if (origins.has("letter") && origins.has("numeric")) {
-        // Mixed number+letter pair ("12-M", "18-M", "M-REG") - the brand is
-        // stating its own equivalence, not a dual size span. Trust the
-        // letter side rather than our own numeric chart.
-        buckets = resolved.filter((r) => r.origin === "letter").map((r) => r.bucket);
-      } else {
-        // Genuine dual-span (both numeric - "18/20" - or both letter -
-        // "S/M") - the item fits both groups, so it should surface in both.
-        buckets = resolved.map((r) => r.bucket);
-      }
-      const uniq = [...new Set(buckets)];
-      uniq.sort((a, b) => {
-        const ia = SIZE_BUCKET_ORDER.indexOf(a);
-        const ib = SIZE_BUCKET_ORDER.indexOf(b);
-        return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+      const promptText = buildBundlePrompt(bundleItems, bundleCategory || "items", bundleSizeLabel || "", bundlePricing);
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-5",
+          max_tokens: 700,
+          messages: [{ role: "user", content: [{ type: "text", text: promptText }] }],
+        }),
       });
-      return uniq;
-    }
-  }
-
-  // Not something we're confident about (bra sizes, shoe sizes, odd
-  // formats) - return as-is so it still groups with identical labels.
-  return [rawSize.trim()];
-}
-
-function isStaleListing(item) {
-  if (item.status !== "ready") return false;
-  const firstListedAt = [item.ebay_listed_at, item.vinted_listed_at].filter(Boolean).sort()[0];
-  if (!firstListedAt) return false;
-  return daysSince(firstListedAt) >= 30;
-}
-
-// Post-sale lifecycle: ready for posting -> fully done. Turns red after 2
-// days unposted, timed from when the item was actually marked sold. Fires
-// for a partial sale too (status still "ready") via needsPosting, not just
-// once the whole quantity is sold out.
-function getSoldInfo(item) {
-  if (needsPosting(item)) {
-    const days = daysSince(item.sold_at) ?? 0;
-    return { stage: "ready_for_posting", flag: days >= 2 ? "red" : "orange", label: "Ready for posting", days };
-  }
-  if (item.status !== "sold") return null;
-  return { stage: "posted", flag: "none", label: "Sold", days: null };
-}
-
-// Figures out where an item sits in the eBay -> Vinted -> reduce -> relist cycle,
-// and whether the next expected action is on-track, due, or overdue - based on
-// whether that action was actually confirmed (a toggle/button), not just elapsed time.
-function getPipelineInfo(item) {
-  if (item.status !== "ready") return null;
-
-  const firstListedAt = [item.ebay_listed_at, item.vinted_listed_at].filter(Boolean).sort()[0];
-  if (!firstListedAt) return { stage: "not_listed", days: null, flag: "none" };
-
-  const daysActive = daysSince(firstListedAt);
-
-  // Each checkpoint: the day an action is due, and whether it's been confirmed.
-  const checkpoints = [
-    { dueDay: 7, done: !!item.vinted_listed_at, stageIfNotDone: "ebay" },
-    { dueDay: 21, done: !!item.vinted_reduced_at, stageIfNotDone: "vinted" },
-    { dueDay: 90, done: !!item.relisted_at, stageIfNotDone: "reduced" },
-  ];
-
-  for (const cp of checkpoints) {
-    if (daysActive >= cp.dueDay && !cp.done) {
-      const daysOverdue = daysActive - cp.dueDay;
-      return { stage: cp.stageIfNotDone, days: daysActive, flag: daysOverdue > 7 ? "red" : "orange" };
-    }
-  }
-
-  if (daysActive < 7) return { stage: "ebay", days: daysActive, flag: "none" };
-  if (daysActive < 21) return { stage: "vinted", days: daysActive, flag: "none" };
-  if (daysActive < 90) return { stage: "reduced", days: daysActive, flag: "none" };
-  return { stage: "relist", days: daysActive, flag: "none" };
-}
-
-function timeAgo(iso) {
-  if (!iso) return "";
-  const diffMs = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diffMs / 60000);
-  if (mins < 1) return "Just now";
-  if (mins < 60) return `${mins} min${mins === 1 ? "" : "s"} ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days} day${days === 1 ? "" : "s"} ago`;
-  return fmtDate(iso);
-}
-
-function StockListRow({ item: e, onOpen, onDelete }) {
-  const isListed = e.ebay_listed || e.vinted_listed || e.depop_listed;
-  const thumb = e.photos?.[0] || e.thumbnail;
-  const pipeline = getPipelineInfo(e);
-  const soldInfo = getSoldInfo(e);
-  const flagStyle = pipeline ? FLAG_STYLES[pipeline.flag] : FLAG_STYLES.none;
-  const category = getListingCategory(e);
-  const categoryStyle = category ? CATEGORY_STYLES[category] : null;
-  // An overdue pipeline flag (red/orange, from the day-counter) takes visual
-  // priority over the plain category colour, since it's a "do something now"
-  // signal rather than just a status label - otherwise, colour by category.
-  // Whole card fills with the colour (not just an edge), with text staying
-  // dark and bold on top since the wash is kept light enough (35%) to hold contrast.
-  const cardCls =
-    pipeline && pipeline.flag !== "none"
-      ? flagStyle.card
-      : categoryStyle
-      ? categoryStyle.fillMedium
-      : "bg-[#F7F3E8] border-[#C9BFA3]";
-
-  // Processing/needs_size/error are actionable alerts, not listing categories,
-  // so they keep the small solid pill (via StatusBadge). Everything else shows
-  // as plain bold text on the right - the card's own fill already carries the colour.
-  const isAlertStatus = e.status === "processing" || e.status === "needs_size" || e.status === "error";
-  const rightLabel = !isAlertStatus && categoryStyle ? categoryStyle.label : null;
-
-  // A fully sold-and-posted item has nothing left to action - no photos, no
-  // editable listing, nothing to confirm - so it doesn't open a detail screen
-  // at all. Its sale record shows directly in the row instead.
-  const isFullyDone = e.status === "sold" && !!e.posted_at;
-
-  const content = (
-    <>
-      <div className="w-20 h-20 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0 relative">
-        {thumb && <img src={thumb} alt="" className="w-full h-full object-cover" />}
-        {soldInfo?.stage === "posted" && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ mixBlendMode: "multiply" }}>
-            <span className="text-[#A63A2E] border-2 border-[#A63A2E] px-1.5 py-0.5 -rotate-12 font-mono font-bold text-[10px] tracking-widest uppercase opacity-90">
-              Sold
-            </span>
-          </div>
-        )}
-      </div>
-
-      <div className="flex-1 min-w-0">
-        <div className="font-bold text-sm truncate text-[#2B2620]">{e.title}</div>
-        <div className="text-xs text-[#3A3428] font-semibold mt-0.5">
-          {e.status === "sold" && e.sold_at ? `Sold ${fmtDate(e.sold_at)}` : `Added ${timeAgo(e.created_at)}`}
-        </div>
-
-        {isFullyDone ? (
-          <div className="flex items-center gap-3 flex-wrap mt-1.5 font-mono text-xs text-[#2B2620] font-semibold">
-            <span>Sold {(e.quantity || 1) > 1 ? `£${e.sale_price} ea` : `£${e.sale_price ?? "—"}`}{e.sold_platform ? ` on ${e.sold_platform}` : ""}</span>
-            {e.cost_price != null && <span>Paid £{e.cost_price}</span>}
-            {e.sale_price != null && e.cost_price != null && (
-              <span>Profit £{((e.sale_price - e.cost_price) * effectiveQuantitySold(e)).toFixed(2)}</span>
-            )}
-            {e.posted_at && <span>Posted {fmtDate(e.posted_at)}</span>}
-          </div>
-        ) : (
-          <div className="flex items-center gap-2 flex-wrap mt-1.5">
-            {isAlertStatus && <StatusBadge item={e} />}
-            {(e.quantity || 1) > 1 && (
-              <span className="inline-flex items-center text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#2B2620]/10 text-[#2B2620] font-bold">
-                {e.status === "sold" ? `×${e.quantity}` : `${(e.quantity || 1) - (e.quantity_sold || 0)} of ${e.quantity} left`}
-              </span>
-            )}
-            {e.status === "sold" && e.sale_price != null && (
-              <span className="text-[#2B2620] font-mono font-bold text-sm">£{e.sale_price}</span>
-            )}
-            <span className="text-xs font-mono text-[#2B2620] font-semibold">
-              #{stockNumber(e)}{e.batch ? ` · ${e.batch}` : ""}
-            </span>
-            {isListed && (
-              <div className="flex gap-0.5">
-                {e.ebay_listed && (
-                  <span className="w-4 h-4 rounded-sm bg-[#3B6E91] text-white text-[8px] font-bold flex items-center justify-center" title="eBay">EB</span>
-                )}
-                {e.vinted_listed && (
-                  <span className="w-4 h-4 rounded-sm bg-[#7A5980] text-white text-[8px] font-bold flex items-center justify-center" title="Vinted">VI</span>
-                )}
-                {e.depop_listed && (
-                  <span className="w-4 h-4 rounded-sm bg-[#6B6250] text-white text-[8px] font-bold flex items-center justify-center" title="Depop">DE</span>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {soldInfo?.stage === "ready_for_posting" && (
-          <span className={`text-xs font-bold ${soldInfo.flag === "red" ? "text-[#A63A2E]" : "text-[#5A3C0C]"}`}>
-            Needs posting{soldInfo.days > 0 ? ` · ${soldInfo.days}d` : ""}
-          </span>
-        )}
-      </div>
-
-      {rightLabel && (
-        <span className="text-sm font-bold text-[#2B2620] text-right shrink-0 max-w-[7rem]">{rightLabel}</span>
-      )}
-    </>
-  );
-
-  if (isFullyDone) {
-    return (
-      <div className={`w-full flex items-center gap-3 rounded-sm border p-2.5 ${cardCls}`}>
-        {content}
-        {onDelete && (
-          <button
-            onClick={(ev) => {
-              ev.stopPropagation();
-              if (window.confirm(`Delete "${e.title}" permanently? This can't be undone.`)) onDelete(e.id);
-            }}
-            className="shrink-0 text-[#2B2620]/50 hover:text-[#A63A2E] p-1"
-            title="Delete"
-          >
-            <Trash2 size={15} />
-          </button>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <button
-      onClick={() => onOpen(e)}
-      className={`w-full flex items-center gap-3 text-left rounded-sm border p-2.5 transition active:scale-[0.99] ${cardCls}`}
-    >
-      {content}
-      <span className="text-[#2B2620] text-lg shrink-0">›</span>
-    </button>
-  );
-}
-
-
-function ListingHelper({ item }) {
-  const priceLabel =
-    item.recommended_price != null
-      ? `£${item.recommended_price}`
-      : item.price_low === item.price_high || item.price_high == null
-      ? `£${item.price_low ?? "—"}`
-      : `£${item.price_low}–£${item.price_high}`;
-
-  return (
-    <div className="mb-5">
-      <div className="flex flex-col gap-2">
-        <CopyField label="eBay Title" value={item.title} charLimit={80} />
-        <CopyField label="Vinted Title" value={item.vinted_title} />
-        <CopyField label="Starting price (consider allowing offers up to the high end)" value={priceLabel} />
-        {item.size_applicable && <CopyField label="Size" value={item.size} />}
-        <CopyField label="Category" value={item.category} />
-        <CopyField label="Condition" value={item.condition} />
-        <CopyField label="Description" value={item.description} />
-      </div>
-    </div>
-  );
-}
-
-function stockNumber(item) {
-  return item?.id ? item.id.split("-")[0].toUpperCase() : "--------";
-}
-
-function DownloadablePhotos({ item, saveDirHandle, onChooseFolder, onRotate }) {
-  const sku = stockNumber(item);
-  const titleSlug = (item.title || "item").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
-  const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [heroIndex, setHeroIndex] = useState(0);
-  const [rotating, setRotating] = useState(false);
-  const supportsFolderSave = typeof window !== "undefined" && "showDirectoryPicker" in window;
-  const photos = item.photos || [];
-
-  const dataUrlToBlob = (dataUrl) => fetch(dataUrl).then((r) => r.blob());
-
-  const saveToFolder = async () => {
-    if (!saveDirHandle) return;
-    setBusy(true);
-    setSaved(false);
-    try {
-      const subDir = await saveDirHandle.getDirectoryHandle(`${titleSlug}-${sku}`, { create: true });
-      for (let i = 0; i < (item.photos || []).length; i++) {
-        const blob = await dataUrlToBlob(item.photos[i]);
-        const fileHandle = await subDir.getFileHandle(`${titleSlug}-${i + 1}.jpg`, { create: true });
-        const writable = await fileHandle.createWritable();
-        await writable.write(blob);
-        await writable.close();
+      if (!response.ok) {
+        const detail = await response.text();
+        console.error("Anthropic API error (bundle):", response.status, detail);
+        let reason = detail.slice(0, 200);
+        try {
+          reason = JSON.parse(detail)?.error?.message || reason;
+        } catch {}
+        return res.status(502).json({ error: `AI request failed (Anthropic HTTP ${response.status}: ${reason})` });
       }
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2500);
-    } catch (err) {
-      console.error("Save to folder failed:", err);
-      alert("Couldn't save photos to that folder: " + (err.message || err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const downloadZip = async () => {
-    setBusy(true);
-    try {
-      const JSZip = (await import("jszip")).default;
-      const zip = new JSZip();
-      for (let i = 0; i < (item.photos || []).length; i++) {
-        const blob = await (await fetch(item.photos[i])).blob();
-        zip.file(`${titleSlug}-${i + 1}.jpg`, blob);
-      }
-      const blob = await zip.generateAsync({ type: "blob" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${titleSlug}-${sku}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error("Zip download failed:", err);
-      alert("Couldn't build the zip file: " + (err.message || err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="mb-4">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-xs text-[#8A7F63]">Photos</span>
-        <span className="text-xs font-mono text-[#A9822E]/80">Stock #{sku}</span>
-      </div>
-
-      {photos.length > 0 && (
-        <div className="relative w-full aspect-square rounded-sm border border-[#C9BFA3] mb-2 overflow-hidden">
-          <img src={photos[heroIndex]} alt="" className="w-full h-full object-cover" />
-          {onRotate && (
-            <div className="absolute right-2 top-2 flex gap-1.5">
-              <button
-                onClick={async () => {
-                  setRotating(true);
-                  try {
-                    await onRotate(item, heroIndex, "ccw");
-                  } finally {
-                    setRotating(false);
-                  }
-                }}
-                disabled={rotating}
-                title="Rotate 90° left"
-                className="w-9 h-9 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center disabled:opacity-50"
-              >
-                {rotating ? <Loader2 size={16} className="animate-spin" /> : <RotateCcw size={16} />}
-              </button>
-              <button
-                onClick={async () => {
-                  setRotating(true);
-                  try {
-                    await onRotate(item, heroIndex, "cw");
-                  } finally {
-                    setRotating(false);
-                  }
-                }}
-                disabled={rotating}
-                title="Rotate 90° right"
-                className="w-9 h-9 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center disabled:opacity-50"
-              >
-                {rotating ? <Loader2 size={16} className="animate-spin" /> : <RotateCw size={16} />}
-              </button>
-            </div>
-          )}
-          {photos.length > 1 && (
-            <>
-              <button
-                onClick={() => setHeroIndex((i) => (i - 1 + photos.length) % photos.length)}
-                className="absolute left-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center text-lg"
-              >
-                ‹
-              </button>
-              <button
-                onClick={() => setHeroIndex((i) => (i + 1) % photos.length)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-[#2B2620]/50 text-white flex items-center justify-center text-lg"
-              >
-                ›
-              </button>
-              <div className="absolute bottom-2 left-0 right-0 flex justify-center gap-1.5">
-                {photos.map((_, i) => (
-                  <span key={i} className={`w-2 h-2 rounded-full ${i === heroIndex ? "bg-white" : "bg-white/40"}`} />
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-      {photos.length > 1 && (
-        <div className="flex gap-2 overflow-x-auto pb-2">
-          {photos.map((p, i) => (
-            <img
-              key={i}
-              src={p}
-              alt=""
-              onClick={() => setHeroIndex(i)}
-              className={`w-16 h-16 rounded-sm object-cover border shrink-0 cursor-pointer ${
-                i === heroIndex ? "border-[#A9822E] border-2" : "border-[#C9BFA3]"
-              }`}
-            />
-          ))}
-        </div>
-      )}
-
-      {supportsFolderSave ? (
-        !saveDirHandle ? (
-          <button
-            onClick={onChooseFolder}
-            className="w-full mt-2 py-2.5 rounded bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-medium flex items-center justify-center gap-2"
-          >
-            <Download size={15} />
-            Choose download folder (one-time)
-          </button>
-        ) : (
-          <button
-            onClick={saveToFolder}
-            disabled={busy || !(item.photos || []).length}
-            className={`w-full mt-2 py-2.5 rounded border font-medium flex items-center justify-center gap-2 disabled:opacity-50 ${
-              saved ? "bg-[#3F5E42]/15 border-[#3F5E42]/40 text-[#3F5E42]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#2B2620]"
-            }`}
-          >
-            {busy ? <Loader2 size={15} className="animate-spin" /> : saved ? <Check size={15} /> : <Download size={15} />}
-            {busy ? "Saving…" : saved ? "Saved to folder" : `Save ${item.photos?.length || 0} photos to folder`}
-          </button>
-        )
-      ) : (
-        <button
-          onClick={downloadZip}
-          disabled={busy || !(item.photos || []).length}
-          className="w-full mt-2 py-2.5 rounded bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-medium flex items-center justify-center gap-2 disabled:opacity-50"
-        >
-          {busy ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
-          {busy ? "Building zip…" : `Download all ${item.photos?.length || 0} photos (.zip)`}
-        </button>
-      )}
-      {!supportsFolderSave && (
-        <p className="text-xs text-[#8A7F63] mt-1">This browser can't save straight to a folder — using a zip file instead.</p>
-      )}
-    </div>
-  );
-}
-// Multi-user sign-in (username + password via Supabase Auth) was built and
-// shipped in v1/v2, then paused before the second account was actually
-// introduced - it was getting in the way of normal single-user use (locked
-// you out of your own app, forced a Supabase dashboard setting change) for a
-// feature nobody was using yet. Reverted back to the original single shared
-// passcode here; the full sign-in version is preserved in the v2 changelog
-// entry and the delivered file from that point if it's wanted back later.
-function PasscodeGate({ onUnlock }) {
-  const [value, setValue] = useState("");
-  const [error, setError] = useState(false);
-  const expected = process.env.NEXT_PUBLIC_APP_PASSCODE;
-
-  const submit = (e) => {
-    e.preventDefault();
-    if (!expected || value === expected) {
-      localStorage.setItem("snapstock-unlocked", "1");
-      onUnlock();
-    } else {
-      setError(true);
-    }
-  };
-
-  return (
-    <div className="min-h-screen bg-[#EDE6D6] text-[#2B2620] flex items-center justify-center p-4">
-      <form onSubmit={submit} className="w-full max-w-xs flex flex-col gap-3">
-        <div className="flex items-center gap-2 justify-center mb-2">
-          <div className="w-8 h-8 flex items-center justify-center text-[#A9822E]">
-            <SunflowerIcon size={26} />
-          </div>
-          <span className="font-serif text-lg">ItemGen</span>
-        </div>
-        <input
-          type="password"
-          value={value}
-          onChange={(e) => {
-            setValue(e.target.value);
-            setError(false);
-          }}
-          placeholder="Enter passcode"
-          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2.5 text-center"
-          autoFocus
-        />
-        {error && <p className="text-[#A63A2E] text-sm text-center">Wrong passcode</p>}
-        <button type="submit" className="w-full py-2.5 rounded-sm bg-[#A9822E] text-[#2B2620] font-bold">
-          Unlock
-        </button>
-      </form>
-    </div>
-  );
-}
-
-// ---------- main app ----------
-
-export default function Home() {
-  const [unlocked, setUnlocked] = useState(!process.env.NEXT_PUBLIC_APP_PASSCODE);
-  const [checkedLock, setCheckedLock] = useState(false);
-
-  const [view, setView] = useState("dashboard");
-  const [items, setItems] = useState([]);
-  const [stockFilter, setStockFilter] = useState("active");
-  const [loadedItems, setLoadedItems] = useState(false);
-  const [currentPhotos, setCurrentPhotos] = useState([]);
-  const [enhancedFlags, setEnhancedFlags] = useState([]);
-  const [currentBatch, setCurrentBatch] = useState("");
-  const [currentCostPrice, setCurrentCostPrice] = useState("");
-  const [currentQuantity, setCurrentQuantity] = useState(1);
-  const [currentItemType, setCurrentItemType] = useState("resale");
-  const [batchFilter, setBatchFilter] = useState("all");
-  const [stockSearch, setStockSearch] = useState("");
-  const [bundleFilterGender, setBundleFilterGender] = useState("all");
-  const [bundleFilterGarment, setBundleFilterGarment] = useState("all");
-  const [bundleFilterSize, setBundleFilterSize] = useState("all");
-  const [bundleRecords, setBundleRecords] = useState({});
-  const [selectedBundle, setSelectedBundle] = useState(null);
-  const [bundleTitleInput, setBundleTitleInput] = useState("");
-  const [bundleDescInput, setBundleDescInput] = useState("");
-  const [bundleMainPhoto, setBundleMainPhoto] = useState("");
-  const [savingBundle, setSavingBundle] = useState(false);
-  const [generatingBundle, setGeneratingBundle] = useState(false);
-  const [bundleGenError, setBundleGenError] = useState("");
-  const [soldTypeFilter, setSoldTypeFilter] = useState("all");
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [bargains, setBargains] = useState([]);
-  const [bargainSettings, setBargainSettings] = useState(null);
-  const [bargainSettingsDraft, setBargainSettingsDraft] = useState(null);
-  const [scanning, setScanning] = useState(false);
-  const [scanMessage, setScanMessage] = useState("");
-  const [pipelineFilter, setPipelineFilter] = useState("all");
-  const [capturing, setCapturing] = useState(false);
-  const [selectedItem, setSelectedItem] = useState(null);
-  const [saveDirHandle, setSaveDirHandle] = useState(null);
-
-  const chooseSaveFolder = async () => {
-    try {
-      const handle = await window.showDirectoryPicker();
-      setSaveDirHandle(handle);
-    } catch (err) {
-      if (err.name !== "AbortError") console.error("Folder pick failed:", err);
-    }
-  };
-
-  // Rotates one photo 90deg clockwise and re-uploads it to the SAME Storage
-  // path (upsert), so nothing else about the item needs to change - just
-  // cache-busts the URL so the browser actually fetches the new bytes
-  // instead of showing a stale cached copy at the same address. If it's the
-  // first photo, the thumbnail (used everywhere in list views) gets rotated
-  // too, so it doesn't fall out of sync with the photo it was made from.
-  const rotatePhoto = async (item, photoIndex, direction = "cw") => {
-    try {
-      const currentUrl = item.photos[photoIndex];
-      const dataUrl = await urlToDataUrl(currentUrl);
-      const rotated = await rotateDataUrl(dataUrl, direction);
-      const path = `${item.id}/${photoIndex}.jpg`;
-      const newUrl = await uploadPhotoToStorage(rotated, path);
-      const bustedUrl = `${newUrl}?t=${Date.now()}`;
-
-      const newPhotos = [...item.photos];
-      newPhotos[photoIndex] = bustedUrl;
-      const updates = { photos: newPhotos };
-
-      if (photoIndex === 0 && item.thumbnail) {
-        const smallRotated = await resizeDataUrl(rotated, 600, 0.65);
-        const thumbUrl = await uploadPhotoToStorage(smallRotated, `${item.id}/thumb.jpg`);
-        updates.thumbnail = `${thumbUrl}?t=${Date.now()}`;
-      }
-
-      await supabase.from("items").update(updates).eq("id", item.id);
-      const updated = { ...item, ...updates };
-      setSelectedItem(updated);
-      setEditDraft((d) => (d ? { ...d, ...updates } : d));
-      fetchItems();
-    } catch (err) {
-      console.error("Rotate failed:", err);
-      alert("Couldn't rotate that photo: " + (err.message || err));
-    }
-  };
-
-  const [editDraft, setEditDraft] = useState(null);
-  const [editing, setEditing] = useState(false);
-  const pollRef = useRef(null);
-
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      if (!process.env.NEXT_PUBLIC_APP_PASSCODE || localStorage.getItem("snapstock-unlocked") === "1") {
-        setUnlocked(true);
-      }
-      setCheckedLock(true);
-    }
-  }, []);
-
-  const fetchItems = useCallback(async () => {
-    const leanColumns =
-      "id, title, thumbnail, status, sale_price, cost_price, recommended_price, sold_platform, sold_at, quantity, quantity_sold, created_at, category, size, batch, ebay_listed, vinted_listed, depop_listed, ebay_listed_at, vinted_listed_at, vinted_reduced_at, relisted_at, posted_at, item_type";
-
-    let { data, error } = await supabase.from("items").select(leanColumns).order("created_at", { ascending: false });
-
-    if (error) {
-      console.error("Lean fetchItems failed, falling back to full select:", error);
-      const fallback = await supabase.from("items").select("*").order("created_at", { ascending: false });
-      data = fallback.data;
-      error = fallback.error;
-    }
-
-    if (error) console.error("fetchItems failed:", error);
-    if (!error && data) setItems(data);
-    setLoadedItems(true);
-  }, []);
-
-  useEffect(() => {
-    if (!unlocked) return;
-    fetchItems();
-  }, [unlocked, fetchItems]);
-
-  const fetchBargains = useCallback(async () => {
-    const { data, error } = await supabase.from("bargains").select("*").order("found_at", { ascending: false });
-    if (error) {
-      console.error("fetchBargains failed:", error);
-      return;
-    }
-    setBargains(data || []);
-  }, []);
-
-  // Bundle detail (title/description/main photo) is keyed by group_key -
-  // the same "category|sizeBucket" key the Bundles view groups items by -
-  // rather than by item IDs, so a saved bundle keeps its title/description
-  // as stock comes and goes and just picks up whichever items currently
-  // match that category+size.
-  const fetchBundleRecords = useCallback(async () => {
-    const { data, error } = await supabase.from("bundles").select("*");
-    if (error) {
-      console.error("fetchBundleRecords failed:", error);
-      return;
-    }
-    const map = {};
-    (data || []).forEach((b) => {
-      map[b.group_key] = b;
-    });
-    setBundleRecords(map);
-  }, []);
-
-  const fetchBargainSettings = useCallback(async () => {
-    const { data } = await supabase.from("bargain_settings").select("*").eq("id", "default").single();
-    const settings = data || {
-      id: "default",
-      min_profit: 10,
-      min_roi_pct: 30,
-      max_purchase_price: 100,
-      min_discount_pct: 20,
-      categories: "",
-    };
-    setBargainSettings(settings);
-    setBargainSettingsDraft(settings);
-  }, []);
-
-  const [lastBackupAt, setLastBackupAt] = useState(null);
-
-  const fetchLastBackup = useCallback(async () => {
-    try {
-      const { data } = await supabase.from("app_meta").select("last_backup_at").eq("id", "default").single();
-      setLastBackupAt(data?.last_backup_at || null);
-    } catch (err) {
-      // No row yet (first time ever) - treated the same as "never backed up".
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!unlocked) return;
-    fetchBargains();
-    fetchBargainSettings();
-    fetchLastBackup();
-    fetchBundleRecords();
-  }, [unlocked, fetchBargains, fetchBargainSettings, fetchLastBackup, fetchBundleRecords]);
-
-  const persistBundle = async (group, title, description, mainPhoto) => {
-    const payload = {
-      group_key: group.key,
-      title: (title || "").trim(),
-      description: (description || "").trim(),
-      main_photo: mainPhoto || null,
-      updated_at: new Date().toISOString(),
-    };
-    const { data, error } = await supabase.from("bundles").upsert(payload, { onConflict: "group_key" }).select().single();
-    if (error) throw error;
-    setBundleRecords((prev) => ({ ...prev, [group.key]: data }));
-    return data;
-  };
-
-  // Writes the title/description with AI, same as individual items -
-  // no manual "generate" click needed, it just happens - and saves the
-  // result straight away so a fresh bundle is ready to copy into Vinted
-  // the moment you open it. mainPhoto is passed in rather than read from
-  // state, since state set moments earlier in the same call isn't visible
-  // yet inside this async function.
-  const runBundleGeneration = async (group, mainPhoto, { autoSave } = {}) => {
-    setBundleGenError("");
-    setGeneratingBundle(true);
-    try {
-      const pricing = computeBundlePricing(group.items);
-      const gen = await analyzeBundle(
-        group.items.map((e) => ({ title: e.title, size: e.size })),
-        group.items[0].category,
-        group.bucket,
-        pricing
-      );
-      const title = gen.title || `${group.items.length}× ${group.items[0].category} · Size ${group.bucket}`;
-      const description = gen.description || "";
-      setBundleTitleInput(title);
-      setBundleDescInput(description);
-      if (autoSave) {
-        await persistBundle(group, title, description, mainPhoto);
-      }
-    } catch (err) {
-      console.error("Bundle generation failed:", err);
-      setBundleGenError(err.message || "Couldn't write a title/description automatically - you can still write your own below.");
-    } finally {
-      setGeneratingBundle(false);
-    }
-  };
-
-  const openBundle = (group) => {
-    setSelectedBundle(group);
-    setBundleGenError("");
-    const rec = bundleRecords[group.key];
-    const mainPhoto = rec?.main_photo ?? group.items[0]?.thumbnail ?? "";
-    setBundleMainPhoto(mainPhoto);
-    if (rec?.title) {
-      setBundleTitleInput(rec.title);
-      setBundleDescInput(rec.description || "");
-      return;
-    }
-    setBundleTitleInput(`${group.items.length}× ${group.items[0].category} · Size ${group.bucket}`);
-    setBundleDescInput("");
-    runBundleGeneration(group, mainPhoto, { autoSave: true });
-  };
-
-  const closeBundle = () => setSelectedBundle(null);
-
-  const saveBundle = async () => {
-    if (!selectedBundle) return;
-    setSavingBundle(true);
-    try {
-      await persistBundle(selectedBundle, bundleTitleInput, bundleDescInput, bundleMainPhoto);
-      setSelectedBundle(null);
-    } catch (err) {
-      alert("Couldn't save this bundle: " + err.message);
-    } finally {
-      setSavingBundle(false);
-    }
-  };
-
-
-  const saveBargainSettings = async () => {
-    if (!bargainSettingsDraft) return;
-    const payload = { ...bargainSettingsDraft, id: "default" };
-    const { error } = await supabase.from("bargain_settings").upsert(payload, { onConflict: "id" });
-    if (error) {
-      alert("Couldn't save settings: " + error.message);
-      return;
-    }
-    setBargainSettings(payload);
-  };
-
-  const runBargainScan = async () => {
-    setScanning(true);
-    setScanMessage("");
-    try {
-      const res = await fetch("/api/bargains-scan", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Scan failed");
-      setScanMessage(`Checked ${data.candidatesChecked} candidate(s), found ${data.bargainsFound} bargain(s).`);
-      fetchBargains();
-    } catch (err) {
-      console.error("Bargain scan failed:", err);
-      setScanMessage("Scan failed: " + (err.message || err));
-    } finally {
-      setScanning(false);
-    }
-  };
-
-  const dismissBargain = async (id) => {
-    await supabase.from("bargains").delete().eq("id", id);
-    fetchBargains();
-  };
-
-  // Poll for updates while on the stock tab - fast (4s) while something's
-  // actually processing so completion shows up quickly, otherwise slow (30s)
-  // just to catch a new item captured on the other device. Constant 4s
-  // polling regardless of state was the single biggest source of egress,
-  // since every poll re-reads every item's thumbnail.
-  useEffect(() => {
-    if (view !== "stock" || !unlocked) return;
-    const hasProcessing = items.some((e) => e.status === "processing");
-    pollRef.current = setInterval(fetchItems, hasProcessing ? 4000 : 30000);
-    return () => clearInterval(pollRef.current);
-  }, [view, unlocked, fetchItems, items]);
-
-  const handleAddPhoto = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setCapturing(true);
-    try {
-      const full = await compressImage(file, 1600, 0.85);
-      const result = await autoEnhance(full);
-      setCurrentPhotos((prev) => [...prev, result.url].slice(0, 7));
-      setEnhancedFlags((prev) => [...prev, result.enhanced].slice(0, 7));
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setCapturing(false);
-      e.target.value = "";
-    }
-  };
-
-  const runFullGeneration = useCallback(async (id, photos, confirmedFields, ebaySearchQuery) => {
-    try {
-      const safePhotos = await ensureUnderSizeLimit(photos);
-      const result = await analyzeItem(safePhotos, "full", confirmedFields || null, ebaySearchQuery || null);
-      const { error: updateError } = await supabase
-        .from("items")
-        .update({
-          title: result.title || "Untitled item",
-          vinted_title: result.vintedTitle || null,
-          description: result.description || "",
-          category: result.category || "",
-          condition: result.condition || "",
-          brand: result.brand || "",
-          price_low: result.estimated_price_low ?? null,
-          price_high: result.estimated_price_high ?? null,
-          recommended_price: result.recommended_price ?? null,
-          comparable_count: result.comparable_count ?? null,
-          price_confidence: result.price_confidence || null,
-          confidence: result.confidence || "medium",
-          notes: result.notes || "",
-          verify_before_listing: Array.isArray(result.verify_before_listing) ? result.verify_before_listing : [],
-          vinted_price_low: result.vinted_price_low ?? null,
-          vinted_price_high: result.vinted_price_high ?? null,
-          demand: result.demand || null,
-          listing_recommendation: result.listing_recommendation || null,
-          used_real_ebay_data: !!result._usedRealEbayData,
-          ebay_active_listings: result._ebayTotalListings ?? null,
-          status: "ready",
-        })
-        .eq("id", id);
-      // Supabase doesn't throw on a failed update by default - it just
-      // returns an error object - so this has to be checked explicitly, or a
-      // failure (e.g. a database column that doesn't exist) leaves the item
-      // stuck at "processing" forever with no visible error at all.
-      if (updateError) throw updateError;
-    } catch (err) {
-      console.error(err);
-      await supabase.from("items").update({ status: "error", error_detail: err.message || String(err) }).eq("id", id);
-    }
-    fetchItems();
-  }, [fetchItems]);
-
-  const processItem = useCallback(async (id, photos) => {
-    try {
-      const safePhotos = await ensureUnderSizeLimit(photos);
-      const quick = await analyzeItem(safePhotos, "quick");
-      const sizeApplicable = quick.size_applicable === true;
-      const size = quick.size || null;
-      const searchQuery = quick.search_query || null;
-
-      if (sizeApplicable && !size) {
-        // Stop here - can't write an accurate listing without knowing the size.
-        // The item page will show a required prompt; runFullGeneration only
-        // fires once the user answers it (see confirmSizeGate).
-        await supabase
-          .from("items")
-          .update({ status: "needs_size", size_applicable: true, size: null, ebay_search_query: searchQuery })
-          .eq("id", id);
-        fetchItems();
-        return;
-      }
-
-      await supabase.from("items").update({ size_applicable: sizeApplicable, size, ebay_search_query: searchQuery }).eq("id", id);
-      await runFullGeneration(id, photos, sizeApplicable && size ? { size } : null, searchQuery);
-    } catch (err) {
-      console.error(err);
-      await supabase.from("items").update({ status: "error", error_detail: err.message || String(err) }).eq("id", id);
-      fetchItems();
-    }
-  }, [fetchItems]);
-
-  const handleNextItem = async () => {
-    if (currentPhotos.length === 0) return;
-    try {
-      const id = crypto.randomUUID();
-      const thumbDataUrl = await resizeDataUrl(currentPhotos[0], 600, 0.65).catch(() => currentPhotos[0]);
-      // Thumbnail goes to Storage too, same as full photos - a base64 blob
-      // sitting directly in the database row gets re-read on every fetchItems
-      // call (PostgREST egress), which is what actually caused the spike.
-      const thumbnail = await uploadPhotoToStorage(thumbDataUrl, `${id}/thumb.jpg`).catch(() => thumbDataUrl);
-
-      // Upload full-size photos to Storage instead of embedding them in the
-      // database row - this is what actually fixes the egress problem, since
-      // Storage URLs can be cached by the browser after the first view.
-      const photoUrls = [];
-      for (let i = 0; i < currentPhotos.length; i++) {
-        const url = await uploadPhotoToStorage(currentPhotos[i], `${id}/${i}.jpg`);
-        photoUrls.push(url);
-      }
-
-      const { data, error } = await supabase
-        .from("items")
-        .insert({
-          id,
-          title: "Untitled item",
-          status: "processing",
-          photos: photoUrls,
-          thumbnail,
-          batch: currentBatch.trim() || null,
-          cost_price: currentCostPrice === "" ? null : Number(currentCostPrice),
-          quantity: currentQuantity || 1,
-          quantity_sold: 0,
-          item_type: currentItemType,
-        })
-        .select()
-        .single();
-
-      if (error) throw error;
-      setCurrentPhotos([]);
-      setEnhancedFlags([]);
-      setCurrentQuantity(1);
-      fetchItems();
-      processItem(data.id, photoUrls);
-    } catch (err) {
-      console.error("handleNextItem failed:", err);
-      alert("Next item failed: " + (err.message || JSON.stringify(err)));
-    }
-  };
-
-  const itemDetailCache = useRef({});
-  const CACHE_TTL_MS = 60000;
-
-  const openItem = async (item) => {
-    setSelectedItem(item);
-    setEditDraft(item);
-    setEditing(false);
-    setSizeGateInput("");
-
-    const cached = itemDetailCache.current[item.id];
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
-      setSelectedItem(cached.data);
-      setEditDraft(cached.data);
-      return;
-    }
-
-    try {
-      const { data, error } = await supabase.from("items").select("*").eq("id", item.id).single();
-      if (!error && data) {
-        itemDetailCache.current[item.id] = { data, timestamp: Date.now() };
-        setSelectedItem(data);
-        setEditDraft(data);
-      }
-    } catch (err) {
-      console.error("Failed to load item photos:", err);
-    }
-  };
-  const closeItem = () => {
-    setSelectedItem(null);
-    setEditDraft(null);
-    setEditing(false);
-  };
-
-  const saveEdits = async () => {
-    if (!editDraft) return;
-    await supabase
-      .from("items")
-      .update({
-        title: editDraft.title,
-        vinted_title: editDraft.vinted_title,
-        description: editDraft.description,
-        category: editDraft.category,
-        condition: editDraft.condition,
-        price_low: editDraft.price_low,
-        price_high: editDraft.price_high,
-        size: editDraft.size,
-        brand: editDraft.brand,
-        batch: editDraft.batch,
-        item_type: editDraft.item_type,
-      })
-      .eq("id", editDraft.id);
-    setSelectedItem(editDraft);
-    fetchItems();
-  };
-
-  const refreshWithAI = async () => {
-    if (!editDraft) return;
-    const confirmedFields = {};
-    if (editDraft.size?.trim()) confirmedFields.size = editDraft.size.trim();
-    if (editDraft.category?.trim()) confirmedFields.category = editDraft.category.trim();
-    if (editDraft.condition?.trim()) confirmedFields.condition = editDraft.condition.trim();
-    if (editDraft.brand?.trim()) confirmedFields.brand = editDraft.brand.trim();
-
-    await supabase
-      .from("items")
-      .update({ category: editDraft.category, condition: editDraft.condition, status: "processing" })
-      .eq("id", editDraft.id);
-    setSelectedItem((s) => ({ ...s, status: "processing" }));
-    setEditing(false);
-    fetchItems();
-    runFullGeneration(editDraft.id, editDraft.photos, Object.keys(confirmedFields).length ? confirmedFields : null, editDraft.ebay_search_query);
-  };
-
-  const retryItem = async (item) => {
-    await supabase.from("items").update({ status: "processing" }).eq("id", item.id);
-    setSelectedItem({ ...item, status: "processing" });
-    fetchItems();
-    processItem(item.id, item.photos);
-  };
-
-  const [sizeGateInput, setSizeGateInput] = useState("");
-
-  const confirmSizeGate = async (withValue) => {
-    const size = withValue ? sizeGateInput.trim() : "Not specified";
-    const item = selectedItem;
-    await supabase.from("items").update({ size, status: "processing" }).eq("id", item.id);
-    setSelectedItem((s) => ({ ...s, size, status: "processing" }));
-    setSizeGateInput("");
-    fetchItems();
-    runFullGeneration(item.id, item.photos, size === "Not specified" ? null : { size }, item.ebay_search_query);
-  };
-
-  const [soldFormFor, setSoldFormFor] = useState(null);
-  const [soldPriceInput, setSoldPriceInput] = useState("");
-  const [costPriceInput, setCostPriceInput] = useState("");
-  const [soldQtyInput, setSoldQtyInput] = useState("1");
-  const [soldPlatformInput, setSoldPlatformInput] = useState("");
-
-  const [exporting, setExporting] = useState(false);
-  const [exportingExcel, setExportingExcel] = useState(false);
-
-  const recordBackup = async () => {
-    const now = new Date().toISOString();
-    await supabase.from("app_meta").upsert({ id: "default", last_backup_at: now }, { onConflict: "id" });
-    setLastBackupAt(now);
-  };
-
-  const exportBackup = async () => {
-    setExporting(true);
-    try {
-      const { data, error } = await supabase.from("items").select("*").order("created_at", { ascending: false });
-      if (error) throw error;
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `itemgen-backup-${new Date().toISOString().slice(0, 10)}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      await recordBackup();
-    } catch (err) {
-      console.error("Export failed:", err);
-      alert("Backup export failed: " + (err.message || err));
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  // Excel export for browsing/editing in a spreadsheet - one row per item,
-  // photos/thumbnail deliberately left out (huge base64/URLs, not useful in
-  // a spreadsheet cell) since the JSON backup above already covers full
-  // fidelity including photos. This is the "look at and sanity-check your
-  // stock in a table" export, not the disaster-recovery one.
-  const exportBackupExcel = async () => {
-    setExportingExcel(true);
-    try {
-      const { data, error } = await supabase.from("items").select("*").order("created_at", { ascending: false });
-      if (error) throw error;
-      const allItems = data || [];
-
-      // Stock tab - your priority fields (box, dates, prices, sold info) up
-      // front, AI pricing detail and descriptive text pushed to the end.
-      const rows = allItems.map((item) => ({
-        "Stock #": stockNumber(item),
-        Batch: item.batch || "",
-        "Captured date": item.created_at ? item.created_at.slice(0, 10) : "",
-        Title: item.title || "",
-        "Vinted Title": item.vinted_title || "",
-        Status: item.status || "",
-        "Cost price (£)": item.cost_price ?? "",
-        "Sale price (£)": item.sale_price ?? "",
-        "Sold platform": item.sold_platform || "",
-        "Sold date": item.sold_at ? item.sold_at.slice(0, 10) : "",
-        "Posted date": item.posted_at ? item.posted_at.slice(0, 10) : "",
-        "Item type": item.item_type === "personal" ? "Personal" : "Resale",
-        Category: item.category || "",
-        Size: item.size || "",
-        Brand: item.brand || "",
-        Condition: item.condition || "",
-        Quantity: item.quantity ?? 1,
-        "Quantity sold": item.quantity_sold ?? 0,
-        "Recommended price (£)": item.recommended_price ?? "",
-        "Price low (£)": item.price_low ?? "",
-        "Price high (£)": item.price_high ?? "",
-        "Price confidence": item.price_confidence || "",
-        "Vinted price low (£)": item.vinted_price_low ?? "",
-        "Vinted price high (£)": item.vinted_price_high ?? "",
-        Demand: item.demand || "",
-        "Listed on eBay": item.ebay_listed ? "Yes" : "No",
-        "Listed on Vinted": item.vinted_listed ? "Yes" : "No",
-        "Listed on Depop": item.depop_listed ? "Yes" : "No",
-        "Verify before listing": Array.isArray(item.verify_before_listing) ? item.verify_before_listing.join("; ") : "",
-        Notes: item.notes || "",
-        Description: item.description || "",
-      }));
-
-      // Sold tab - tax-shaped, one row per completed sale. Resale items only
-      // (personal sales excluded, same split as the Finances page) and only
-      // items with at least one unit actually sold - the numbers are ready
-      // to hand over as-is, no cleanup needed.
-      const soldRows = allItems
-        .filter((item) => item.item_type !== "personal" && effectiveQuantitySold(item) > 0)
-        .sort((a, b) => new Date(b.sold_at || 0) - new Date(a.sold_at || 0))
-        .map((item) => {
-          const qty = effectiveQuantitySold(item);
-          const salePrice = Number(item.sale_price) || 0;
-          const costPrice = Number(item.cost_price) || 0;
-          const totalRevenue = Math.round(salePrice * qty * 100) / 100;
-          const totalCost = Math.round(costPrice * qty * 100) / 100;
-          return {
-            "Date sold": item.sold_at ? item.sold_at.slice(0, 10) : "",
-            Item: item.title || "",
-            Box: item.batch || "",
-            Platform: item.sold_platform || "",
-            "Quantity sold": qty,
-            "Sale price per item (£)": salePrice,
-            "Total revenue (£)": totalRevenue,
-            "Cost per item (£)": costPrice,
-            "Total cost (£)": totalCost,
-            "Profit (£)": Math.round((totalRevenue - totalCost) * 100) / 100,
-          };
-        });
-
-      // Monthly Trends tab - the same monthly rollup logic already used on
-      // the Finances page, so the numbers here always match what's in-app.
-      const monthGroups = {};
-      allItems
-        .filter((item) => item.item_type !== "personal" && effectiveQuantitySold(item) > 0)
-        .forEach((item) => {
-          const dateStr = item.sold_at || item.created_at;
-          if (!dateStr) return;
-          const d = new Date(dateStr);
-          const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-          if (!monthGroups[key]) monthGroups[key] = { revenue: 0, cost: 0, units: 0 };
-          const qty = effectiveQuantitySold(item);
-          monthGroups[key].revenue += (Number(item.sale_price) || 0) * qty;
-          monthGroups[key].cost += (Number(item.cost_price) || 0) * qty;
-          monthGroups[key].units += qty;
-        });
-      const trendRows = Object.entries(monthGroups)
-        .sort((a, b) => (a[0] < b[0] ? 1 : -1))
-        .map(([key, v]) => ({
-          Month: new Date(`${key}-01`).toLocaleDateString("en-GB", { month: "long", year: "numeric" }),
-          "Units sold": v.units,
-          "Revenue (£)": Math.round(v.revenue * 100) / 100,
-          "Cost (£)": Math.round(v.cost * 100) / 100,
-          "Profit (£)": Math.round((v.revenue - v.cost) * 100) / 100,
-        }));
-
-      const XLSX = await import("xlsx");
-
-      // Auto-sizes columns based on the longest value (or header) in each -
-      // fixes the truncated-text problem from a plain default-width export.
-      const autoFitColumns = (rowsForSheet) => {
-        if (rowsForSheet.length === 0) return [];
-        const headers = Object.keys(rowsForSheet[0]);
-        return headers.map((h) => {
-          const longest = Math.max(h.length, ...rowsForSheet.map((r) => String(r[h] ?? "").length));
-          return { wch: Math.min(Math.max(longest + 2, 8), 45) };
-        });
-      };
-
-      // Applies a £ currency number format to specific columns by header
-      // name, so money reads as £12.50 instead of a bare 12.5.
-      const applyCurrencyFormat = (worksheet, rowsForSheet, currencyHeaders) => {
-        const headers = Object.keys(rowsForSheet[0] || {});
-        headers.forEach((h, colIdx) => {
-          if (!currencyHeaders.includes(h)) return;
-          const col = XLSX.utils.encode_col(colIdx);
-          rowsForSheet.forEach((_, rowIdx) => {
-            const cellRef = `${col}${rowIdx + 2}`; // +2: row 1 is the header
-            if (worksheet[cellRef] && typeof worksheet[cellRef].v === "number") {
-              worksheet[cellRef].z = "£#,##0.00";
-            }
-          });
-        });
-      };
-
-      const soldSheet = XLSX.utils.json_to_sheet(soldRows);
-      soldSheet["!cols"] = autoFitColumns(soldRows);
-      applyCurrencyFormat(soldSheet, soldRows, [
-        "Sale price per item (£)",
-        "Total revenue (£)",
-        "Cost per item (£)",
-        "Total cost (£)",
-        "Profit (£)",
-      ]);
-
-      const stockSheet = XLSX.utils.json_to_sheet(rows);
-      stockSheet["!cols"] = autoFitColumns(rows);
-      applyCurrencyFormat(stockSheet, rows, [
-        "Cost price (£)",
-        "Sale price (£)",
-        "Recommended price (£)",
-        "Price low (£)",
-        "Price high (£)",
-        "Vinted price low (£)",
-        "Vinted price high (£)",
-      ]);
-
-      const trendSheet = XLSX.utils.json_to_sheet(trendRows);
-      trendSheet["!cols"] = autoFitColumns(trendRows);
-      applyCurrencyFormat(trendSheet, trendRows, ["Revenue (£)", "Cost (£)", "Profit (£)"]);
-
-      const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, soldSheet, "Sold");
-      XLSX.utils.book_append_sheet(workbook, trendSheet, "Trends");
-      XLSX.utils.book_append_sheet(workbook, stockSheet, "Stock");
-      XLSX.writeFile(workbook, `itemgen-stock-${new Date().toISOString().slice(0, 10)}.xlsx`);
-      await recordBackup();
-    } catch (err) {
-      console.error("Excel export failed:", err);
-      alert("Excel export failed: " + (err.message || err));
-    } finally {
-      setExportingExcel(false);
-    }
-  };
-
-  const openSoldForm = (item) => {
-    setSoldFormFor(item);
-    setSoldPriceInput(item.recommended_price != null ? String(item.recommended_price) : item.price_low != null ? String(item.price_low) : "");
-    setCostPriceInput(item.cost_price != null ? String(item.cost_price) : "");
-    // Default to 1, not the full remaining count - defaulting to "sell
-    // everything left" was too easy to confirm by accident and silently
-    // over-report quantity sold when really only one unit had gone.
-    setSoldQtyInput("1");
-    // Guess the platform only when it's unambiguous - listed on exactly one
-    // of eBay/Vinted/Depop. Otherwise leave it blank and make you choose.
-    const listedOn = [item.ebay_listed && "eBay", item.vinted_listed && "Vinted", item.depop_listed && "Depop"].filter(Boolean);
-    setSoldPlatformInput(listedOn.length === 1 ? listedOn[0] : "");
-  };
-
-  const confirmSold = async () => {
-    if (!soldFormFor) return;
-    const totalQty = soldFormFor.quantity || 1;
-    const priorSold = soldFormFor.quantity_sold || 0;
-    const qtySoldNow = Math.max(1, Math.min(totalQty - priorSold, Number(soldQtyInput) || 1));
-    const quantity_sold = priorSold + qtySoldNow;
-    const remaining = totalQty - quantity_sold;
-
-    // sale_price/cost_price are stored PER UNIT, consistent with how cost is
-    // entered at capture. Selling fewer than all remaining units keeps the
-    // item "ready" - no need to re-photograph the leftover stock.
-    const sale_price = soldPriceInput === "" ? null : Number(soldPriceInput);
-    const cost_price = costPriceInput === "" ? null : Number(costPriceInput);
-    const sold_platform = soldPlatformInput || null;
-    const sold_at = new Date().toISOString();
-    const status = remaining <= 0 ? "sold" : "ready";
-
-    const updates = { status, sale_price, cost_price, sold_platform, sold_at, quantity_sold };
-    await supabase.from("items").update(updates).eq("id", soldFormFor.id);
-    const updated = { ...soldFormFor, ...updates };
-    setSelectedItem(updated);
-    setEditDraft((d) => (d ? { ...d, ...updates } : d));
-    setSoldFormFor(null);
-    fetchItems();
-  };
-
-  const unmarkSold = async (item) => {
-    // Full undo - resets quantity_sold back to 0, since individual sale
-    // events aren't tracked separately (only the running total is kept).
-    // sold_at is cleared too, otherwise needsPosting() would keep flagging
-    // this item as "needs posting" even though the sale was just undone.
-    const updates = { status: "ready", quantity_sold: 0, sold_at: null };
-    await supabase.from("items").update(updates).eq("id", item.id);
-    setSelectedItem({ ...item, ...updates });
-    setEditDraft((d) => (d ? { ...d, ...updates } : d));
-    fetchItems();
-  };
-
-  const togglePlatform = async (item, field) => {
-    const newVal = !item[field];
-    const dateField = `${field}_at`;
-    const newDate = newVal ? new Date().toISOString() : null;
-    const updates = { [field]: newVal, [dateField]: newDate };
-    await supabase.from("items").update(updates).eq("id", item.id);
-    const updated = { ...item, ...updates };
-    setSelectedItem(updated);
-    setEditDraft((d) => (d ? { ...d, ...updates } : d));
-    fetchItems();
-  };
-
-  const confirmPipelineAction = async (item, field) => {
-    const now = new Date().toISOString();
-    await supabase.from("items").update({ [field]: now }).eq("id", item.id);
-    setSelectedItem({ ...item, [field]: now });
-    fetchItems();
-  };
-
-  // Once an item is posted, its photos have done their job - clearing them
-  // out of Storage (and the DB row) frees up real space, since photos are by
-  // far the biggest thing in this app. A tiny (~120px) archive thumbnail is
-  // kept as a permanent visual record - deliberately small and re-compressed,
-  // so there's no full-size original left to recover. Everything else needed
-  // to look back on the sale (price, cost, dates, title, category, size) stays.
-  //
-  // That archiving only makes sense once the item is fully sold out
-  // (status "sold") - if this is a partial sale on a quantity>1 item, the
-  // remaining stock is still listed and still needs its photos, so posting
-  // just clears the "needs posting" flag (posted_at) without touching them.
-  const confirmPosted = async (item) => {
-    const now = new Date().toISOString();
-    if (item.status !== "sold") {
-      // Same class of bug already hit once before with runFullGeneration
-      // (see the comment on that update call): Supabase doesn't throw on a
-      // failed update, it just returns an error object, so it has to be
-      // checked explicitly or the click looks like it worked (optimistic
-      // local state update below) while the row never actually changes -
-      // which is exactly "still says needs posting after clicking Posted".
-      const { error } = await supabase.from("items").update({ posted_at: now }).eq("id", item.id);
-      if (error) {
-        alert("Couldn't mark this posted: " + error.message);
-        return;
-      }
-      setSelectedItem({ ...item, posted_at: now });
-      fetchItems();
-      return;
-    }
-    let shrunkDataUrl = null;
-    try {
-      if (item.thumbnail) shrunkDataUrl = await resizeDataUrl(item.thumbnail, 120, 0.5);
-    } catch (err) {
-      console.error("Failed to build archive thumbnail for", item.id, err);
-    }
-    try {
-      const { data: files } = await supabase.storage.from(PHOTO_BUCKET).list(item.id);
-      if (files && files.length) {
-        const paths = files.map((f) => `${item.id}/${f.name}`);
-        await supabase.storage.from(PHOTO_BUCKET).remove(paths);
-      }
-    } catch (err) {
-      console.error("Failed to clear stored photos for", item.id, err);
-      // Don't block marking the item posted just because photo cleanup failed -
-      // worst case a few stray files linger in Storage, not a lost sale record.
-    }
-    // Upload the shrunk thumbnail fresh, after the cleanup above, so it
-    // doesn't get swept up in its own deletion - kept in Storage (not the DB
-    // row) so it never adds to PostgREST egress on every fetch.
-    let archiveThumbnail = null;
-    if (shrunkDataUrl) {
+      const data = await response.json();
+      const text = (data.content || []).map((b) => b.text || "").join("\n").trim();
+      let result;
       try {
-        archiveThumbnail = await uploadPhotoToStorage(shrunkDataUrl, `${item.id}/archive-thumb.jpg`);
-      } catch (err) {
-        console.error("Failed to upload archive thumbnail for", item.id, err);
+        result = extractJson(text);
+      } catch (parseErr) {
+        console.error("Bundle JSON extraction failed. Raw text:", text);
+        return res.status(502).json({ error: parseErr.message });
       }
+      return res.status(200).json(result);
+    } catch (err) {
+      console.error("Bundle analyze route failed:", err);
+      return res.status(500).json({ error: "Internal error writing bundle listing" });
     }
-    const { error: postError } = await supabase
-      .from("items")
-      .update({ posted_at: now, photos: [], thumbnail: archiveThumbnail })
-      .eq("id", item.id);
-    if (postError) {
-      alert("Couldn't mark this posted: " + postError.message);
-      return;
+  }
+
+  if (!Array.isArray(photos) || photos.length === 0) {
+    return res.status(400).json({ error: "No photos provided" });
+  }
+  if (mode !== "quick" && mode !== "full") {
+    return res.status(400).json({ error: "mode must be 'quick' or 'full'" });
+  }
+
+  try {
+    // Photos arrive as either a real http(s) Storage URL (the normal case -
+    // see uploadPhotoToStorage in index.js) or, for older unmigrated items,
+    // a raw base64 data URL. URLs are handed to Anthropic as a "url" image
+    // source, so Anthropic's own servers fetch the full-resolution original
+    // straight from Storage - the photo bytes never have to travel through
+    // this request body at all, which is what actually keeps this route
+    // clear of Vercel's hard 4.5MB serverless request-body limit. Only the
+    // rare legacy base64 photo still needs to be embedded inline.
+    const imageBlocks = photos.map((p) => {
+      if (typeof p === "string" && p.startsWith("data:")) {
+        return {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: "image/jpeg",
+            data: p.split(",")[1],
+          },
+        };
+      }
+      return {
+        type: "image",
+        source: { type: "url", url: p },
+      };
+    });
+
+    const isQuick = mode === "quick";
+
+    let ebayListingsBlock = null;
+    let ebayTotalListings = null;
+    let ebayResults = [];
+    if (!isQuick && ebaySearchQuery) {
+      const marketData = await getEbayMarketData(ebaySearchQuery);
+      ebayListingsBlock = marketData.block;
+      ebayTotalListings = marketData.total;
+      ebayResults = marketData.results || [];
     }
-    setSelectedItem({ ...item, posted_at: now, photos: [], thumbnail: archiveThumbnail });
-    fetchItems();
-  };
 
-  const removeItem = async (id) => {
-    await supabase.from("items").delete().eq("id", id);
-    fetchItems();
-    closeItem();
-  };
-
-  if (!checkedLock) return null;
-  if (!unlocked) return <PasscodeGate onUnlock={() => setUnlocked(true)} />;
-
-  return (
-    <div className="min-h-screen bg-[#EDE6D6] text-[#2B2620] flex flex-col relative">
-      <BackgroundSunflower />
-      <div className="border-b-4 border-double border-[#8A7F63] px-4 sm:px-8 py-3 flex items-center justify-between sticky top-0 bg-[#EDE6D6]/95 backdrop-blur z-10">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 flex items-center justify-center shrink-0 text-[#A9822E]">
-            <SunflowerIcon size={28} />
-          </div>
-          <span className="font-serif text-xl tracking-tight">ItemGen</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="hidden sm:flex bg-[#F7F3E8] rounded-sm p-0.5 border border-[#C9BFA3]">
-            <button
-              onClick={() => setView("dashboard")}
-              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "dashboard" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
-            >
-              Home
-            </button>
-            <button
-              onClick={() => setView("capture")}
-              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "capture" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
-            >
-              Upload New
-            </button>
-            <button
-              onClick={() => setView("stock")}
-              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "stock" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
-            >
-              Stock Locator {items.filter((e) => !(e.status === "sold" && e.posted_at)).length > 0 && `(${items.filter((e) => !(e.status === "sold" && e.posted_at)).length})`}
-            </button>
-            <button
-              onClick={() => setView("pipeline")}
-              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "pipeline" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
-            >
-              Item Status
-            </button>
-            <button
-              onClick={() => setView("bundles")}
-              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "bundles" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
-            >
-              Bundles
-            </button>
-            <button
-              onClick={() => setView("sold")}
-              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "sold" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
-            >
-              Sold
-            </button>
-            <button
-              onClick={() => setView("finances")}
-              className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold transition ${view === "finances" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#4A4436]"}`}
-            >
-              Finances
-            </button>
-          </div>
-
-          <button
-            onClick={() => setMobileMenuOpen((o) => !o)}
-            className="sm:hidden w-8 h-8 flex items-center justify-center rounded-sm border border-[#C9BFA3] bg-[#F7F3E8] text-[#2B2620]"
-            title="Menu"
-          >
-            <Menu size={16} />
-          </button>
-
-          <div className="relative">
-            <button
-              onClick={() => setSettingsOpen((s) => !s)}
-              className="w-8 h-8 flex items-center justify-center rounded-sm border border-[#C9BFA3] bg-[#F7F3E8] text-[#6B6250]"
-              title="Settings"
-            >
-              <SettingsIcon size={16} />
-            </button>
-            {settingsOpen && (
-              <div className="absolute right-0 mt-1 w-64 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm shadow-lg z-20 p-1">
-                <button
-                  onClick={() => {
-                    setSettingsOpen(false);
-                    exportBackup();
-                  }}
-                  disabled={exporting}
-                  className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#2B2620] hover:bg-[#DCD4BC] flex items-center gap-2 disabled:opacity-50"
-                >
-                  {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-                  {exporting ? "Preparing backup…" : "Export full backup (JSON)"}
-                </button>
-                <button
-                  onClick={() => {
-                    setSettingsOpen(false);
-                    exportBackupExcel();
-                  }}
-                  disabled={exportingExcel}
-                  className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#2B2620] hover:bg-[#DCD4BC] flex items-center gap-2 disabled:opacity-50"
-                >
-                  {exportingExcel ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
-                  {exportingExcel ? "Preparing spreadsheet…" : "Export stock as Excel"}
-                </button>
-                <div className="px-3 pt-2 pb-1 text-[10px] font-mono text-[#8A7F63] text-center border-t border-[#C9BFA3] mt-1">{APP_VERSION}</div>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {mobileMenuOpen && (
-        <div className="sm:hidden border-b border-[#C9BFA3] bg-[#F7F3E8] px-3 py-2 flex flex-col sticky top-[57px] z-10">
-          {[
-            { key: "dashboard", label: "Home" },
-            { key: "capture", label: "Upload new" },
-            { key: "stock", label: `Stock Locator${items.filter((e) => !(e.status === "sold" && e.posted_at)).length > 0 ? ` (${items.filter((e) => !(e.status === "sold" && e.posted_at)).length})` : ""}` },
-            { key: "pipeline", label: "Item status" },
-            { key: "bundles", label: "Bundles" },
-            { key: "sold", label: "Sold" },
-            { key: "finances", label: "Finances" },
-          ].map((item) => (
-            <button
-              key={item.key}
-              onClick={() => {
-                setView(item.key);
-                setMobileMenuOpen(false);
-              }}
-              className={`text-left px-2 py-2.5 rounded-sm text-sm font-bold ${
-                view === item.key ? "bg-[#A9822E] text-[#2B2620]" : "text-[#2B2620]"
-              }`}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {view === "dashboard" && (
-        <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
-          {(() => {
-            const soldItems = items.filter((e) => e.status === "sold");
-            const activeItems = items.filter((e) => e.status !== "sold");
-            // Needs Attention covers everything that's genuinely stuck:
-            // needs_size/error block a listing from happening at all,
-            // ready_for_posting is a sale waiting on you to post it -
-            // needsPosting catches this whether the whole item sold out
-            // (status "sold") or just one unit of a quantity>1 stock entry
-            // (status stays "ready" while the rest is still for sale) -
-            // stale catches stock that's been listed 30+ days without
-            // selling anywhere, and add_to_vinted catches something listed
-            // on eBay 7+ days that hasn't been added to Vinted yet.
-            const needsVintedListing = (e) => {
-              const p = getPipelineInfo(e);
-              return p && p.stage === "ebay" && p.flag !== "none";
-            };
-            const needsAttention = items
-              .filter(
-                (e) =>
-                  e.status === "needs_size" ||
-                  e.status === "error" ||
-                  needsPosting(e) ||
-                  isStaleListing(e) ||
-                  needsVintedListing(e)
-              )
-              .map((e) => ({
-                ...e,
-                _reason:
-                  e.status === "needs_size" || e.status === "error"
-                    ? "status"
-                    : needsPosting(e)
-                    ? "ready_for_posting"
-                    : isStaleListing(e)
-                    ? "stale"
-                    : "add_to_vinted",
-              }));
-
-            return (
-              <>
-                <p className="font-serif text-2xl mb-6">Home</p>
-
-                <div className="grid grid-cols-2 gap-3 mb-4">
-                  <div className="rounded-sm p-3 border bg-[#F7F3E8] border-[#C9BFA3]">
-                    <span className="text-xs uppercase tracking-wide block mb-1 text-[#8A7F63]">Active stock</span>
-                    <span className="font-mono text-xl">{activeItems.length}</span>
-                  </div>
-                  <div className="rounded-sm p-3 border bg-[#F7F3E8] border-[#C9BFA3]">
-                    <span className="text-xs uppercase tracking-wide block mb-1 text-[#8A7F63]">Sold</span>
-                    <span className="font-mono text-xl">{soldItems.length}</span>
-                  </div>
-                </div>
-
-                {(() => {
-                  const daysSinceBackup = lastBackupAt ? daysSince(lastBackupAt) : null;
-                  const dueForBackup = daysSinceBackup === null || daysSinceBackup >= 14;
-                  if (!dueForBackup) return null;
-                  return (
-                    <button
-                      onClick={() => setSettingsOpen(true)}
-                      className="w-full mb-4 flex items-center justify-between bg-[#8A7F63]/10 border border-[#8A7F63]/30 rounded-sm p-3 text-left"
-                    >
-                      <span className="text-sm text-[#2B2620]">
-                        {lastBackupAt
-                          ? `Last backup was ${daysSinceBackup} day${daysSinceBackup === 1 ? "" : "s"} ago`
-                          : "You haven't backed up your stock yet"}
-                      </span>
-                      <span className="text-xs font-bold text-[#6B6250] shrink-0 ml-2">Back up now</span>
-                    </button>
-                  );
-                })()}
-
-                <div>
-                  <p className="text-xs font-semibold text-[#A63A2E] uppercase tracking-wide mb-2">
-                    Needs attention {needsAttention.length > 0 && `(${needsAttention.length})`}
-                  </p>
-                  {needsAttention.length === 0 ? (
-                    <div className="flex items-center gap-2 py-4 text-[#8A7F63]">
-                      <SunflowerIcon size={16} className="opacity-40" />
-                      <span className="text-sm">Nothing needs attention right now.</span>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col gap-2">
-                      {needsAttention.map((e) => (
-                        <button
-                          key={e.id}
-                          onClick={() => openItem(e)}
-                          className="flex items-center gap-3 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-2.5 text-left"
-                        >
-                          <div className="w-10 h-10 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0">
-                            {e.thumbnail && <img src={e.thumbnail} alt="" className="w-full h-full object-cover" />}
-                          </div>
-                          <span className="text-sm truncate flex-1">{e.title}</span>
-                          {e._reason === "stale" ? (
-                            <span className="inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm bg-[#A63A2E] text-white">
-                              Not selling
-                            </span>
-                          ) : e._reason === "add_to_vinted" ? (
-                            <span className="inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm bg-[#7A5980] text-white">
-                              Add to Vinted
-                            </span>
-                          ) : (
-                            <StatusBadge item={e} />
-                          )}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </>
-            );
-          })()}
-        </div>
-      )}
-
-      {view === "finances" && (
-        <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
-          {(() => {
-            const resaleItems = items.filter((e) => e.item_type !== "personal");
-            const personalItems = items.filter((e) => e.item_type === "personal");
-
-            // Revenue comes from units actually sold (effectiveQuantitySold),
-            // which can be >0 on a "ready" item too if only some of its
-            // quantity has sold so far - not just fully-sold items. Personal
-            // items are excluded entirely - tracked separately below instead.
-            const revenue = resaleItems.reduce((s, e) => s + (Number(e.sale_price) || 0) * effectiveQuantitySold(e), 0);
-            // Cost is money actually spent - per-unit cost × total quantity
-            // ever captured for that item, summed across every item.
-            const cost = resaleItems.reduce((s, e) => s + (Number(e.cost_price) || 0) * (Number(e.quantity) || 1), 0);
-
-            // Personal items get their own simple tally - kept for your own
-            // tracking, out of the resale revenue/cost/profit figures above.
-            const personalSoldItems = personalItems.filter((e) => effectiveQuantitySold(e) > 0);
-            const personalRevenue = personalSoldItems.reduce((s, e) => s + (Number(e.sale_price) || 0) * effectiveQuantitySold(e), 0);
-
-            // Monthly trends - grouped by the month an item was last sold
-            // (falling back to created_at for old sold items from before
-            // sold_at existed). Note: if an item's quantity sold across more
-            // than one month (a partial sale, then the rest later), all its
-            // quantity gets attributed to the most recent sale's month -
-            // a simplification since individual sale events aren't logged.
-            const monthGroups = {};
-            resaleItems
-              .filter((e) => effectiveQuantitySold(e) > 0)
-              .forEach((e) => {
-                const dateStr = e.sold_at || e.created_at;
-                if (!dateStr) return;
-                const d = new Date(dateStr);
-                const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-                if (!monthGroups[key]) monthGroups[key] = { revenue: 0, cost: 0, units: 0 };
-                const qty = effectiveQuantitySold(e);
-                monthGroups[key].revenue += (Number(e.sale_price) || 0) * qty;
-                monthGroups[key].cost += (Number(e.cost_price) || 0) * qty;
-                monthGroups[key].units += qty;
-              });
-            const monthTrends = Object.entries(monthGroups)
-              .sort((a, b) => (a[0] < b[0] ? 1 : -1))
-              .slice(0, 6)
-              .map(([key, v]) => ({
-                key,
-                label: new Date(`${key}-01`).toLocaleDateString("en-GB", { month: "long", year: "numeric" }),
-                ...v,
-                profit: v.revenue - v.cost,
-              }));
-
-            return (
-              <>
-                <p className="font-serif text-2xl mb-6">Finances</p>
-
-                <div className="grid grid-cols-3 gap-3 mb-3">
-                  {[
-                    { label: "Revenue", value: fmtMoney(revenue, { signed: true }), positive: revenue > 0 },
-                    { label: "Cost", value: fmtMoney(-cost, { signed: true }), negative: cost > 0 },
-                    { label: "Profit", value: fmtMoney(revenue - cost, { signed: true }), highlight: true },
-                  ].map((s) => (
-                    <div
-                      key={s.label}
-                      className={`rounded-sm p-3 border ${
-                        s.highlight ? "bg-[#3F5E42]/10 border-[#3F5E42]/40" : "bg-[#F7F3E8] border-[#C9BFA3]"
-                      }`}
-                    >
-                      <span className={`text-xs uppercase tracking-wide block mb-1 ${s.highlight ? "text-[#3F5E42]" : "text-[#8A7F63]"}`}>
-                        {s.label}
-                      </span>
-                      <span
-                        className={`font-mono text-xl ${
-                          s.highlight
-                            ? revenue - cost >= 0
-                              ? "text-[#3F5E42] font-bold"
-                              : "text-[#A63A2E] font-bold"
-                            : s.positive
-                            ? "text-[#3F5E42]"
-                            : s.negative
-                            ? "text-[#A63A2E]"
-                            : ""
-                        }`}
-                      >
-                        {s.value}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-
-                {monthTrends.length === 0 ? (
-                  <p className="text-sm text-[#8A7F63] py-8 text-center">No sales yet to show trends for.</p>
-                ) : (
-                  <div>
-                    <p className="text-xs font-semibold text-[#8A7F63] uppercase tracking-wide mb-2">Monthly trends</p>
-                    <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm divide-y divide-[#C9BFA3]">
-                      {monthTrends.map((m) => (
-                        <div key={m.key} className="flex items-center justify-between px-3 py-2.5">
-                          <div>
-                            <span className="text-sm font-medium block">{m.label}</span>
-                            <span className="text-xs text-[#8A7F63]">{m.units} unit{m.units === 1 ? "" : "s"} sold</span>
-                          </div>
-                          <div className="flex items-center gap-4 font-mono text-sm">
-                            <span className="text-[#3F5E42]">{fmtMoney(m.revenue, { signed: true })}</span>
-                            <span className="text-[#A63A2E]">{fmtMoney(-m.cost, { signed: true })}</span>
-                            <span className={`font-bold ${m.profit >= 0 ? "text-[#3F5E42]" : "text-[#A63A2E]"}`}>
-                              {fmtMoney(m.profit, { signed: true })}
-                            </span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {personalSoldItems.length > 0 && (
-                  <div className="mt-6 pt-6 border-t border-[#C9BFA3]">
-                    <div className={`rounded-sm p-3 border ${CATEGORY_STYLES.vinted.tint}`}>
-                      <span className={`text-xs uppercase tracking-wide block mb-1 ${CATEGORY_STYLES.vinted.text}`}>
-                        Personal sales ({personalSoldItems.length}) — kept separate from the figures above
-                      </span>
-                      <span className={`font-mono text-xl font-bold ${CATEGORY_STYLES.vinted.text}`}>
-                        £{personalRevenue.toFixed(2)}
-                      </span>
-                    </div>
-                  </div>
-                )}
-              </>
-            );
-          })()}
-        </div>
-      )}
-
-      {view === "bargains" && (
-        <div className="flex-1 p-4 sm:p-8 max-w-3xl w-full mx-auto">
-          <p className="font-serif text-2xl mb-1">Bargains</p>
-          <p className="text-sm text-[#8A7F63] mb-5">
-            Retailer clearance stock checked against real eBay prices — the numbers decide, not a guess.
-          </p>
-
-          <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-4 mb-6">
-            <p className="text-xs font-semibold text-[#6B6250] uppercase tracking-wide mb-3">Filters</p>
-            {bargainSettingsDraft && (
-              <div className="grid grid-cols-2 gap-3 mb-3">
-                <div>
-                  <label className="text-xs text-[#8A7F63] mb-1 block">Min profit (£)</label>
-                  <input
-                    type="number"
-                    value={bargainSettingsDraft.min_profit}
-                    onChange={(e) => setBargainSettingsDraft({ ...bargainSettingsDraft, min_profit: Number(e.target.value) })}
-                    className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-[#8A7F63] mb-1 block">Min ROI (%)</label>
-                  <input
-                    type="number"
-                    value={bargainSettingsDraft.min_roi_pct}
-                    onChange={(e) => setBargainSettingsDraft({ ...bargainSettingsDraft, min_roi_pct: Number(e.target.value) })}
-                    className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-[#8A7F63] mb-1 block">Max purchase price (£)</label>
-                  <input
-                    type="number"
-                    value={bargainSettingsDraft.max_purchase_price}
-                    onChange={(e) => setBargainSettingsDraft({ ...bargainSettingsDraft, max_purchase_price: Number(e.target.value) })}
-                    className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-[#8A7F63] mb-1 block">Min discount off RRP (%)</label>
-                  <input
-                    type="number"
-                    value={bargainSettingsDraft.min_discount_pct}
-                    onChange={(e) => setBargainSettingsDraft({ ...bargainSettingsDraft, min_discount_pct: Number(e.target.value) })}
-                    className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
-                  />
-                </div>
-                <div className="col-span-2">
-                  <label className="text-xs text-[#8A7F63] mb-1 block">Categories to include (comma separated, blank = all)</label>
-                  <input
-                    value={bargainSettingsDraft.categories || ""}
-                    onChange={(e) => setBargainSettingsDraft({ ...bargainSettingsDraft, categories: e.target.value })}
-                    placeholder="e.g. Home & Furniture, Kitchen"
-                    className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
-                  />
-                </div>
-              </div>
-            )}
-            <button
-              onClick={saveBargainSettings}
-              className="w-full py-2 rounded bg-[#DCD4BC] text-[#2B2620] font-medium text-sm"
-            >
-              Save filters
-            </button>
-          </div>
-
-          <button
-            onClick={runBargainScan}
-            disabled={scanning}
-            className="w-full py-3 rounded bg-[#A9822E] text-[#2B2620] font-bold flex items-center justify-center gap-2 disabled:opacity-50 mb-2"
-          >
-            {scanning ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
-            {scanning ? "Scanning B&M…" : "Scan now"}
-          </button>
-          {scanMessage && <p className="text-xs text-[#8A7F63] text-center mb-6">{scanMessage}</p>}
-          {!scanMessage && <div className="mb-6" />}
-
-          {bargains.length === 0 ? (
-            <p className="text-sm text-[#8A7F63] py-8 text-center">
-              No bargains found yet — hit "Scan now" to check B&M's current clearance stock.
-            </p>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {bargains.map((b) => (
-                <div key={b.id} className="flex items-center gap-3 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-3">
-                  <div className="w-16 h-16 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0">
-                    {b.image_url && <img src={b.image_url} alt="" className="w-full h-full object-cover" />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-bold text-[#2B2620] truncate">{b.product_name}</p>
-                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1 font-mono text-xs text-[#2B2620]">
-                      <span className="bg-[#6B6250] text-white px-1.5 py-0.5 rounded-sm font-sans font-bold">{b.retailer}</span>
-                      <span>£{b.retailer_price} <span className="text-[#8A7F63]">(RRP £{b.rrp}, -{b.discount_pct}%)</span></span>
-                      <span className="text-[#3F5E42] font-bold">Profit £{b.profit} · {b.roi_pct}% ROI</span>
-                      {!b.in_stock && <span className="text-[#A63A2E] font-bold">Check availability</span>}
-                    </div>
-                  </div>
-                  <div className="flex flex-col gap-1 shrink-0">
-                    {b.product_url && (
-                      <a
-                        href={b.product_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs font-bold text-center bg-[#A9822E] text-[#2B2620] px-2.5 py-1.5 rounded-sm"
-                      >
-                        View
-                      </a>
-                    )}
-                    <button
-                      onClick={() => dismissBargain(b.id)}
-                      className="text-xs text-[#8A7F63] px-2.5 py-1"
-                    >
-                      Dismiss
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {view === "pipeline" && (
-        <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
-          {(() => {
-            // Everything currently active (listed or not), plus sold items
-            // still waiting to be posted - fully-done sold items live in
-            // their own Sold view instead, not mixed in here.
-            const categorized = items
-              .filter((e) => e.status === "ready" || (e.status === "sold" && !e.posted_at))
-              .map((e) => ({ ...e, _category: getListingCategory(e) }));
-
-            const CATEGORY_ORDER = ["unlisted", "ebay", "vinted", "both", "ready_for_posting"];
-            const categoryCounts = {};
-            categorized.forEach((e) => {
-              if (e._category) categoryCounts[e._category] = (categoryCounts[e._category] || 0) + 1;
-            });
-
-            const filtered = (pipelineFilter === "all" ? categorized : categorized.filter((e) => e._category === pipelineFilter)).filter(
-              (e) => batchFilter === "all" || e.batch === batchFilter
-            );
-
-            const batches = [...new Set(categorized.map((e) => e.batch).filter(Boolean))].sort();
-
-            return (
-              <>
-                <p className="font-serif text-2xl mb-5">Item Status</p>
-
-                <div className="flex flex-wrap gap-2 mb-3">
-                  <button
-                    onClick={() => setPipelineFilter("all")}
-                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold border-2 transition bg-[#8A6116] text-white ${
-                      pipelineFilter === "all" ? "border-[#2B2620]" : "border-transparent"
-                    }`}
-                  >
-                    All ({categorized.length})
-                  </button>
-                  {CATEGORY_ORDER.map((key) => {
-                    const style = CATEGORY_STYLES[key];
-                    const active = pipelineFilter === key;
-                    return (
-                      <button
-                        key={key}
-                        onClick={() => setPipelineFilter(key)}
-                        className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide font-bold border-2 transition ${style.solid} ${
-                          active ? "border-[#2B2620]" : "border-transparent"
-                        }`}
-                      >
-                        {style.label} ({categoryCounts[key] || 0})
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {batches.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mb-5">
-                    <button
-                      onClick={() => setBatchFilter("all")}
-                      className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
-                        batchFilter === "all" ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
-                      }`}
-                    >
-                      All boxes
-                    </button>
-                    {batches.map((b) => (
-                      <button
-                        key={b}
-                        onClick={() => setBatchFilter(b)}
-                        className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
-                          batchFilter === b ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
-                        }`}
-                      >
-                        {b} ({categorized.filter((e) => e.batch === b).length})
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                <div className="flex flex-col gap-2">
-                  {filtered.length === 0 ? (
-                    <p className="text-sm text-[#8A7F63] py-8 text-center">Nothing here right now.</p>
-                  ) : (
-                    filtered.map((e) => <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />)
-                  )}
-                </div>
-              </>
-            );
-          })()}
-        </div>
-      )}
-
-      {view === "bundles" && (
-        <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
-          {(() => {
-            const AGED_DAYS_THRESHOLD = 60; // roughly "2 months" - worth calling out for bundling/discounting
-
-            const readyItems = items
-              .filter((e) => e.status === "ready")
-              .map((e) => {
-                const garment = parseGarmentType(e.category);
-                const gender = parseGender(e.category);
-                return {
-                  ...e,
-                  _gender: gender,
-                  _garment: garment,
-                  // An array, not a single bucket - a genuine dual-span size
-                  // like "18/20" belongs in both the "18"(L) and "20"(XL)
-                  // groups rather than forming its own separate one.
-                  _sizeBuckets: normalizeSize(e.size, garment, gender) || [],
-                  _ageDays: daysSince(e.created_at) ?? 0,
-                };
-              });
-
-            // Build filter option lists from what's actually in stock, not a
-            // fixed hardcoded list - so it always matches your real categories.
-            const genderOptions = [...new Set(readyItems.map((e) => e._gender).filter(Boolean))].sort();
-            const garmentOptions = [...new Set(readyItems.map((e) => e._garment).filter(Boolean))].sort();
-            // Size options are the normalized buckets, not raw labels - so
-            // picking "M" catches "M", "12-14", and "12" all at once.
-            const sizeOptions = [...new Set(readyItems.flatMap((e) => e._sizeBuckets))].sort();
-
-            const filtered = readyItems.filter(
-              (e) =>
-                (bundleFilterGender === "all" || e._gender === bundleFilterGender) &&
-                (bundleFilterGarment === "all" || e._garment === bundleFilterGarment) &&
-                (bundleFilterSize === "all" || e._sizeBuckets.includes(bundleFilterSize))
-            );
-            const filtersActive = bundleFilterGender !== "all" || bundleFilterGarment !== "all" || bundleFilterSize !== "all";
-
-            // Same category + normalized size bucket, count >= 2 - the
-            // automatic suggestion list. Grouping on the bucket (not the raw
-            // size text) is what catches "12-14"/"M"/"12" as the same size.
-            // A dual-span item is added to every bucket it belongs to, so it
-            // can surface in more than one suggested bundle.
-            // Sorted so groups containing older stock surface first, since
-            // ageing stock is exactly what most needs bundling out.
-            const groups = {};
-            readyItems.forEach((e) => {
-              if (!e.category || !e._sizeBuckets.length) return;
-              const seen = new Set();
-              e._sizeBuckets.forEach((bucket) => {
-                const bucketKey = bucket.toLowerCase();
-                if (seen.has(bucketKey)) return;
-                seen.add(bucketKey);
-                const key = `${e.category.trim().toLowerCase()}|${bucketKey}`;
-                if (!groups[key]) groups[key] = { key, bucket, items: [] };
-                groups[key].items.push(e);
-              });
-            });
-            const bundleSuggestions = Object.values(groups)
-              .filter((g) => g.items.length >= 2)
-              .map((g) => ({ key: g.key, bucket: g.bucket, items: g.items, maxAge: Math.max(...g.items.map((e) => e._ageDays)) }))
-              .sort((a, b) => b.maxAge - a.maxAge);
-
-            return (
-              <>
-                <p className="font-serif text-2xl mb-1">Bundles</p>
-                <p className="text-sm text-[#8A7F63] mb-5">
-                  Browse active stock by gender, garment type, and size to find bundle matches yourself, or check the suggestions below.
-                </p>
-
-                <div className="grid grid-cols-3 gap-2 mb-6">
-                  <div>
-                    <label className="text-xs text-[#8A7F63] mb-1 block">Gender</label>
-                    <select
-                      value={bundleFilterGender}
-                      onChange={(e) => setBundleFilterGender(e.target.value)}
-                      className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-2 py-2 text-sm"
-                    >
-                      <option value="all">All</option>
-                      {genderOptions.map((g) => (
-                        <option key={g} value={g}>{g}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-xs text-[#8A7F63] mb-1 block">Garment</label>
-                    <select
-                      value={bundleFilterGarment}
-                      onChange={(e) => setBundleFilterGarment(e.target.value)}
-                      className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-2 py-2 text-sm"
-                    >
-                      <option value="all">All</option>
-                      {garmentOptions.map((g) => (
-                        <option key={g} value={g}>{g}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-xs text-[#8A7F63] mb-1 block">Size</label>
-                    <select
-                      value={bundleFilterSize}
-                      onChange={(e) => setBundleFilterSize(e.target.value)}
-                      className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-2 py-2 text-sm"
-                    >
-                      <option value="all">All</option>
-                      {sizeOptions.map((s) => (
-                        <option key={s} value={s}>{s}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                {filtersActive && (
-                  <div className="mb-8">
-                    <p className="text-xs font-semibold text-[#6B6250] uppercase tracking-wide mb-2">
-                      {filtered.length} matching item{filtered.length === 1 ? "" : "s"}
-                    </p>
-                    {filtered.length === 0 ? (
-                      <p className="text-sm text-[#8A7F63] py-4 text-center">Nothing matches those filters right now.</p>
-                    ) : (
-                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-                        {filtered.map((e) => (
-                          <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <p className="text-xs font-semibold text-[#A9822E] uppercase tracking-wide mb-2">Suggested bundles</p>
-                {bundleSuggestions.length === 0 ? (
-                  <p className="text-sm text-[#8A7F63] py-8 text-center">No bundle matches right now.</p>
-                ) : (
-                  <div className="flex flex-col gap-2">
-                    {bundleSuggestions.map((group, i) => {
-                      const aged = group.maxAge >= AGED_DAYS_THRESHOLD;
-                      const saved = bundleRecords[group.key];
-                      return (
-                        <div
-                          key={i}
-                          onClick={() => openBundle(group)}
-                          role="button"
-                          tabIndex={0}
-                          className={`rounded-sm p-3 border cursor-pointer transition hover:brightness-95 ${aged ? "bg-[#A63A2E]/8 border-[#A63A2E]/30" : "bg-[#A9822E]/8 border-[#A9822E]/30"}`}
-                        >
-                          <div className="flex items-center justify-between mb-2 gap-2">
-                            <p className="text-sm font-medium">
-                              {saved?.title || `${group.items.length}× ${group.items[0].category} · Size ${group.bucket}`}
-                            </p>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              {saved && (
-                                <span className="text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#3F5E42]/15 text-[#3F5E42]">
-                                  Saved
-                                </span>
-                              )}
-                              {aged && (
-                                <span className="text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded-sm bg-[#A63A2E] text-white">
-                                  Aged {group.maxAge}d
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          <div className="flex flex-col gap-1.5">
-                            {group.items.map((e) => (
-                              <button
-                                key={e.id}
-                                onClick={(ev) => {
-                                  ev.stopPropagation();
-                                  openItem(e);
-                                }}
-                                className="text-sm text-left text-[#2B2620] underline decoration-[#C9BFA3] flex items-center gap-1.5"
-                              >
-                                {e.title}
-                                <span className="text-xs text-[#8A7F63] no-underline shrink-0">(labelled {e.size})</span>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {selectedBundle && (() => {
-                  const bundlePricing = computeBundlePricing(selectedBundle.items);
-                  return (
-                  <div className="fixed inset-0 bg-[#2B2620]/60 z-30 flex items-end sm:items-center justify-center p-4">
-                    <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto">
-                      <p className="font-serif text-lg mb-1">Bundle details</p>
-                      <p className="text-xs text-[#8A7F63] mb-3">
-                        {selectedBundle.items.length} items · {selectedBundle.items[0].category} · Size {selectedBundle.bucket}
-                      </p>
-
-                      {bundlePricing && (
-                        <div className="flex items-center justify-between bg-[#3F5E42]/8 border border-[#3F5E42]/30 rounded-sm px-3 py-2 mb-3">
-                          <div>
-                            <p className="text-[10px] uppercase tracking-wide text-[#3F5E42]">Suggested bundle price</p>
-                            <p className="font-mono text-lg font-bold text-[#2B2620]">£{bundlePricing.suggestedPrice}</p>
-                          </div>
-                          <p className="text-xs text-[#6B6250] text-right">
-                            £{bundlePricing.combinedValue} bought separately
-                            <br />
-                            <span className="text-[#3F5E42] font-medium">save £{bundlePricing.savings}</span>
-                          </p>
-                        </div>
-                      )}
-
-                      <p className="text-xs text-[#8A7F63] mb-4">
-                        {generatingBundle
-                          ? "Writing a title and description with AI…"
-                          : "Written automatically to help it sell - edit anything below, then Save. Each field has its own Copy button so you can paste title and description straight into Vinted's own boxes."}
-                      </p>
-                      {bundleGenError && (
-                        <p className="text-xs text-[#A63A2E] bg-[#A63A2E]/8 border border-[#A63A2E]/30 rounded-sm px-3 py-2 mb-3">
-                          {bundleGenError}
-                        </p>
-                      )}
-                      <div className="flex flex-col gap-3">
-                        <div>
-                          <div className="flex items-center justify-between mb-1">
-                            <label className="text-xs text-[#8A7F63]">Title</label>
-                            <div className="flex items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => runBundleGeneration(selectedBundle, bundleMainPhoto, { autoSave: true })}
-                                disabled={generatingBundle}
-                                className="flex items-center gap-1 text-xs font-medium text-[#A9822E] disabled:opacity-40"
-                              >
-                                <RefreshCw size={12} className={generatingBundle ? "animate-spin" : ""} />
-                                {generatingBundle ? "Writing…" : "Regenerate"}
-                              </button>
-                              <InlineCopyButton text={bundleTitleInput} />
-                            </div>
-                          </div>
-                          <input
-                            value={bundleTitleInput}
-                            onChange={(e) => setBundleTitleInput(e.target.value)}
-                            disabled={generatingBundle}
-                            placeholder={generatingBundle ? "Writing…" : ""}
-                            className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm disabled:opacity-60"
-                            autoFocus
-                          />
-                        </div>
-                        <div>
-                          <div className="flex items-center justify-between mb-1">
-                            <label className="text-xs text-[#8A7F63]">Description</label>
-                            <InlineCopyButton text={bundleDescInput} />
-                          </div>
-                          <textarea
-                            value={bundleDescInput}
-                            onChange={(e) => setBundleDescInput(e.target.value)}
-                            disabled={generatingBundle}
-                            placeholder={generatingBundle ? "Writing…" : ""}
-                            rows={7}
-                            className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm resize-none disabled:opacity-60"
-                          />
-                        </div>
-                        <div>
-                          <label className="text-xs text-[#8A7F63] mb-1 block">Main photo</label>
-                          {selectedBundle.items.some((e) => e.thumbnail) ? (
-                            <div className="grid grid-cols-4 gap-2">
-                              {selectedBundle.items
-                                .filter((e) => e.thumbnail)
-                                .map((e) => (
-                                  <button
-                                    key={e.id}
-                                    type="button"
-                                    onClick={() => setBundleMainPhoto(e.thumbnail)}
-                                    className={`aspect-square rounded-sm overflow-hidden border-2 ${
-                                      bundleMainPhoto === e.thumbnail ? "border-[#A9822E]" : "border-transparent"
-                                    }`}
-                                  >
-                                    <img src={e.thumbnail} alt="" className="w-full h-full object-cover" />
-                                  </button>
-                                ))}
-                            </div>
-                          ) : (
-                            <p className="text-xs text-[#8A7F63]">No photos available yet for these items.</p>
-                          )}
-                        </div>
-                        <div className="flex flex-col gap-1.5 pt-2 mt-1 border-t border-[#C9BFA3]">
-                          <p className="text-[10px] uppercase tracking-wide text-[#8A7F63] mb-1">Items in this bundle</p>
-                          {selectedBundle.items.map((e) => (
-                            <button
-                              key={e.id}
-                              onClick={() => {
-                                setSelectedBundle(null);
-                                openItem(e);
-                              }}
-                              className="flex items-center gap-2 text-left"
-                            >
-                              <span className="w-8 h-8 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0">
-                                {e.thumbnail && <img src={e.thumbnail} alt="" className="w-full h-full object-cover" />}
-                              </span>
-                              <span className="text-sm text-[#2B2620] underline decoration-[#C9BFA3]">{e.title}</span>
-                              {e.recommended_price != null && (
-                                <span className="text-xs text-[#8A7F63] font-mono ml-auto shrink-0">£{e.recommended_price}</span>
-                              )}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                      <div className="flex gap-2 mt-5">
-                        <button
-                          onClick={closeBundle}
-                          className="flex-1 py-2.5 rounded bg-[#DCD4BC] text-[#2B2620] font-medium"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          onClick={saveBundle}
-                          disabled={savingBundle || !bundleTitleInput.trim()}
-                          className="flex-1 py-2.5 rounded bg-[#A9822E] text-[#2B2620] font-bold disabled:opacity-40"
-                        >
-                          {savingBundle ? "Saving…" : "Save"}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                  );
-                })()}
-              </>
-            );
-          })()}
-        </div>
-      )}
-
-      {view === "sold" && (
-        <div className="flex-1 p-4 sm:p-8 max-w-5xl w-full mx-auto">
-          {(() => {
-            const soldArchive = items
-              .filter((e) => e.status === "sold" && e.posted_at)
-              .filter((e) => soldTypeFilter === "all" || (soldTypeFilter === "personal" ? e.item_type === "personal" : e.item_type !== "personal"))
-              .sort((a, b) => new Date(b.sold_at || b.posted_at) - new Date(a.sold_at || a.posted_at));
-            const totalCount = items.filter((e) => e.status === "sold" && e.posted_at).length;
-            const resaleCount = items.filter((e) => e.status === "sold" && e.posted_at && e.item_type !== "personal").length;
-            const personalCount = items.filter((e) => e.status === "sold" && e.posted_at && e.item_type === "personal").length;
-
-            return (
-              <>
-                <p className="font-serif text-2xl mb-1">Sold</p>
-                <p className="text-sm text-[#8A7F63] mb-5">
-                  Everything sold and posted — a permanent record, photos cleared.
-                </p>
-
-                <div className="flex gap-2 mb-5">
-                  <button
-                    onClick={() => setSoldTypeFilter("all")}
-                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
-                      soldTypeFilter === "all" ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
-                    }`}
-                  >
-                    All ({totalCount})
-                  </button>
-                  <button
-                    onClick={() => setSoldTypeFilter("resale")}
-                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
-                      soldTypeFilter === "resale" ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
-                    }`}
-                  >
-                    Resale ({resaleCount})
-                  </button>
-                  <button
-                    onClick={() => setSoldTypeFilter("personal")}
-                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
-                      soldTypeFilter === "personal" ? `${CATEGORY_STYLES.vinted.solid} border-transparent` : `${CATEGORY_STYLES.vinted.tint} ${CATEGORY_STYLES.vinted.text}`
-                    }`}
-                  >
-                    Personal ({personalCount})
-                  </button>
-                </div>
-
-                {soldArchive.length === 0 ? (
-                  <p className="text-sm text-[#8A7F63] py-8 text-center">
-                    {soldTypeFilter === "personal" ? "No personal sales recorded yet." : "Nothing sold and posted yet."}
-                  </p>
-                ) : (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-                    {soldArchive.map((e) => (
-                      <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />
-                    ))}
-                  </div>
-                )}
-              </>
-            );
-          })()}
-        </div>
-      )}
-
-      {view === "capture" && (
-        <div className="flex-1 flex flex-col p-4 sm:p-8 max-w-xl w-full mx-auto">
-          <div className="mb-4">
-            <label className="text-xs text-[#8A7F63] uppercase tracking-wide mb-1 block">
-              Category / Folder (optional — e.g. "Jumpers")
-            </label>
-            <input
-              list="batch-suggestions"
-              value={currentBatch}
-              onChange={(e) => setCurrentBatch(e.target.value)}
-              placeholder="Leave blank for no batch"
-              className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
-            />
-            <datalist id="batch-suggestions">
-              {[...new Set(items.map((i) => i.batch).filter(Boolean))].map((b) => (
-                <option key={b} value={b} />
-              ))}
-            </datalist>
-            {currentBatch && (
-              <p className="text-xs text-[#8A7F63] mt-1">
-                Every item you capture will be tagged "{currentBatch}" until you change or clear this.
-              </p>
-            )}
-          </div>
-
-          <div className="mb-4">
-            <label className="text-xs text-[#8A7F63] uppercase tracking-wide mb-1 block">
-              Price paid (£) — optional, for profit tracking
-            </label>
-            <input
-              type="number"
-              value={currentCostPrice}
-              onChange={(e) => setCurrentCostPrice(e.target.value)}
-              placeholder="Leave blank if unknown"
-              className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
-            />
-            {currentCostPrice && (
-              <p className="text-xs text-[#8A7F63] mt-1">
-                Every item you capture will use £{currentCostPrice} until you change or clear this — handy for box price ÷ number of items.
-              </p>
-            )}
-          </div>
-
-          <div className="mb-4">
-            <label className="text-xs text-[#8A7F63] uppercase tracking-wide mb-1 block">
-              Quantity — identical items sharing these photos
-            </label>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setCurrentQuantity((q) => Math.max(1, q - 1))}
-                className="w-10 h-10 rounded-sm bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-bold text-lg flex items-center justify-center"
-              >
-                −
-              </button>
-              <input
-                type="number"
-                min={1}
-                value={currentQuantity}
-                onChange={(e) => setCurrentQuantity(Math.max(1, Number(e.target.value) || 1))}
-                className="w-20 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono text-center"
-              />
-              <button
-                type="button"
-                onClick={() => setCurrentQuantity((q) => q + 1)}
-                className="w-10 h-10 rounded-sm bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-bold text-lg flex items-center justify-center"
-              >
-                +
-              </button>
-            </div>
-            {currentQuantity > 1 && (
-              <p className="text-xs text-[#8A7F63] mt-1">
-                One stock entry for {currentQuantity} identical items — no need to photograph the same thing twice. Resets to 1 after each capture.
-              </p>
-            )}
-          </div>
-
-          <div className="mb-4">
-            <label className="text-xs text-[#8A7F63] uppercase tracking-wide mb-1 block">
-              Item type
-            </label>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setCurrentItemType("resale")}
-                className={`flex-1 py-2.5 rounded-sm text-sm font-medium border transition ${
-                  currentItemType === "resale"
-                    ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620] font-bold"
-                    : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
-                }`}
-              >
-                Resale stock
-              </button>
-              <button
-                type="button"
-                onClick={() => setCurrentItemType("personal")}
-                className={`flex-1 py-2.5 rounded-sm text-sm font-medium border transition ${
-                  currentItemType === "personal"
-                    ? "bg-[#7A5980] border-[#7A5980] text-white font-bold"
-                    : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
-                }`}
-              >
-                Personal item
-              </button>
-            </div>
-          </div>
-
-          <p className="text-[#6B6250] text-sm mb-4">
-            For best results, try to capture: <span className="font-bold text-[#2B2620]">front · back · label or markings · close-up of any damage · one extra angle</span>. Press <span className="text-[#2B2620] font-medium">Next item</span> to submit these photos for AI identification and pricing.
-          </p>
-
-          <div className="grid grid-cols-4 gap-2 mb-1">
-            {SHOT_LABELS.map((label, i) => (
-              <div key={i} className="aspect-square rounded-sm border border-[#C9BFA3] overflow-hidden flex items-center justify-center bg-[#F7F3E8] relative">
-                {currentPhotos[i] ? (
-                  <>
-                    <img src={currentPhotos[i]} alt="" className="w-full h-full object-cover" />
-                    {enhancedFlags[i] && (
-                      <span
-                        className="absolute bottom-0.5 left-0.5 bg-[#3F5E42] text-white rounded-sm px-1 py-0.5 text-[8px] font-mono uppercase tracking-wide flex items-center gap-0.5"
-                        title="Lighting/colour auto-corrected"
-                      >
-                        <Check size={8} /> Enhanced
-                      </span>
-                    )}
-                    <button
-                      onClick={() => {
-                        setCurrentPhotos((p) => p.filter((_, idx) => idx !== i));
-                        setEnhancedFlags((p) => p.filter((_, idx) => idx !== i));
-                      }}
-                      className="absolute top-0.5 right-0.5 bg-[#EDE6D6]/80 rounded-full p-0.5"
-                    >
-                      <X size={11} />
-                    </button>
-                  </>
-                ) : (
-                  <Camera size={16} className="text-[#C9BFA3]" />
-                )}
-              </div>
-            ))}
-          </div>
-          <div className="grid grid-cols-4 gap-2 mb-4">
-            {SHOT_LABELS.map((label, i) => (
-              <span key={i} className="text-[9px] text-center text-[#8A7F63] uppercase tracking-wide">
-                {i + 1}{i < 2 ? " · req" : ""}
-              </span>
-            ))}
-          </div>
-
-          <div className="grid grid-cols-2 gap-2 mb-3">
-            <div
-              className={`relative py-4 rounded bg-[#F7F3E8] border border-[#C9BFA3] flex items-center justify-center gap-2 font-medium text-[#2B2620] ${
-                currentPhotos.length >= 7 || capturing ? "opacity-40" : ""
-              }`}
-            >
-              {capturing ? <Loader2 size={18} className="animate-spin" /> : <Camera size={18} />}
-              {currentPhotos.length >= 7 ? "Full" : "Take photo"}
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={handleAddPhoto}
-                disabled={currentPhotos.length >= 7 || capturing}
-                style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
-              />
-            </div>
-
-            <div
-              className={`relative py-4 rounded bg-[#F7F3E8] border border-[#C9BFA3] flex items-center justify-center gap-2 font-medium text-[#2B2620] ${
-                currentPhotos.length >= 7 || capturing ? "opacity-40" : ""
-              }`}
-            >
-              <ImageIcon size={18} />
-              {currentPhotos.length >= 7 ? "Full" : "From gallery"}
-              <input
-                type="file"
-                accept="image/*"
-                onChange={handleAddPhoto}
-                disabled={currentPhotos.length >= 7 || capturing}
-                style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
-              />
-            </div>
-          </div>
-
-          <button
-            onClick={handleNextItem}
-            disabled={currentPhotos.length === 0}
-            className="w-full py-4 rounded bg-[#A9822E] text-[#2B2620] flex items-center justify-center gap-2 font-bold disabled:opacity-30 active:scale-[0.98] transition"
-          >
-            <Check size={18} />
-            Next item
-          </button>
-
-          {items.some((e) => e.status === "processing") && (
-            <p className="text-xs text-[#8A7F63] text-center mt-4 flex items-center justify-center gap-1.5">
-              <Loader2 size={11} className="animate-spin" />
-              {items.filter((e) => e.status === "processing").length} item(s) being written up
-            </p>
-          )}
-        </div>
-      )}
-
-      {view === "stock" && (
-        <div className="flex-1 p-4 sm:p-8 max-w-6xl w-full mx-auto">
-          <p className="font-serif text-2xl mb-1">Stock Locator</p>
-          <p className="text-sm text-[#8A7F63] mb-4">Find anything, whatever its status — by name or by box.</p>
-
-          <div className="flex bg-[#F7F3E8] rounded-sm p-0.5 border border-[#C9BFA3] mb-3 w-fit">
-            <button
-              onClick={() => setStockFilter("active")}
-              className={`px-3 py-1.5 rounded-md text-sm font-medium transition ${stockFilter === "active" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
-            >
-              Active
-            </button>
-            <button
-              onClick={() => setStockFilter("sold")}
-              className={`px-3 py-1.5 rounded-md text-sm font-medium transition ${stockFilter === "sold" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
-            >
-              Sold
-            </button>
-            <button
-              onClick={() => setStockFilter("all")}
-              className={`px-3 py-1.5 rounded-md text-sm font-medium transition ${stockFilter === "all" ? "bg-[#A9822E] text-[#2B2620]" : "text-[#6B6250]"}`}
-            >
-              All
-            </button>
-          </div>
-
-          <input
-            value={stockSearch}
-            onChange={(e) => setStockSearch(e.target.value)}
-            placeholder="Search stock by title…"
-            className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm mb-4"
-          />
-
-          {(() => {
-            const batches = [...new Set(items.map((i) => i.batch).filter(Boolean))].sort();
-            return batches.length > 0 ? (
-              <div className="flex flex-wrap gap-2 mb-4">
-                <button
-                  onClick={() => setBatchFilter("all")}
-                  className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
-                    batchFilter === "all" ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
-                  }`}
-                >
-                  All batches
-                </button>
-                {batches.map((b) => (
-                  <button
-                    key={b}
-                    onClick={() => setBatchFilter(b)}
-                    className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
-                      batchFilter === b ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
-                    }`}
-                  >
-                    {b} ({items.filter((i) => i.batch === b && i.status !== "sold").length})
-                  </button>
-                ))}
-              </div>
-            ) : null;
-          })()}
-
-          {(() => {
-            const filteredItems = items
-              .filter((e) => (stockFilter === "all" ? true : stockFilter === "sold" ? e.status === "sold" : e.status !== "sold"))
-              .filter((e) => (batchFilter === "all" ? true : e.batch === batchFilter))
-              .filter((e) => (stockSearch.trim() ? (e.title || "").toLowerCase().includes(stockSearch.trim().toLowerCase()) : true));
-
-            return (
-              <>
-                {!loadedItems ? (
-                  <div className="flex items-center justify-center py-20 text-[#8A7F63]">
-                    <Loader2 size={20} className="animate-spin" />
-                  </div>
-                ) : filteredItems.length === 0 ? (
-                  <div className="text-center py-20 text-[#8A7F63]">
-                    <SunflowerIcon size={32} className="mx-auto mb-3 text-[#8A7F63] opacity-40" />
-                    <p className="text-sm">
-                      {stockFilter === "sold" ? "No sold items yet." : "No stock yet. Capture your first item."}
-                    </p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-                    {filteredItems.map((e) => (
-                      <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />
-                    ))}
-                  </div>
-                )}
-              </>
-            );
-          })()}
-        </div>
-      )}
-
-      {selectedItem && (
-        <div className="fixed inset-0 bg-[#EDE6D6] z-20 flex flex-col">
-          <div className="border-b border-[#C9BFA3] px-4 py-3 flex items-center justify-between sticky top-0 bg-[#EDE6D6] z-10">
-            <button onClick={closeItem} className="flex items-center gap-1 text-[#6B6250] text-sm">
-              <ChevronLeft size={18} />
-              Back
-            </button>
-            <button onClick={() => removeItem(selectedItem.id)} className="text-[#A63A2E] flex items-center gap-1 text-sm">
-              <Trash2 size={15} />
-              Delete
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-4 sm:p-8 max-w-2xl w-full mx-auto">
-            <DownloadablePhotos item={selectedItem} saveDirHandle={saveDirHandle} onChooseFolder={chooseSaveFolder} onRotate={rotatePhoto} />
-
-            {selectedItem.status === "ready" && (
-              <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-3 mb-5">
-                <div className="flex items-center justify-between mb-2">
-                  <p className="text-xs text-[#8A7F63] uppercase tracking-wide">Pricing intelligence</p>
-                  <span className={`text-[10px] font-mono uppercase px-1.5 py-0.5 rounded-sm ${
-                    selectedItem.used_real_ebay_data
-                      ? "bg-[#3F5E42]/15 text-[#3F5E42]"
-                      : "bg-[#8A7F63]/15 text-[#6B6250]"
-                  }`}>
-                    {selectedItem.used_real_ebay_data ? "Real eBay data" : "AI estimate"}
-                  </span>
-                </div>
-
-                {selectedItem.recommended_price != null ? (
-                  <div className="mb-3">
-                    <span className="text-[#8A7F63] text-xs block">Recommended price</span>
-                    <span className="font-mono text-2xl font-bold text-[#2B2620]">£{selectedItem.recommended_price}</span>
-                  </div>
-                ) : null}
-
-                <div className="flex flex-wrap gap-x-6 gap-y-2 font-mono text-sm mb-2">
-                  <div>
-                    <span className="text-[#8A7F63] text-xs block">
-                      {selectedItem.recommended_price != null ? "Likely range" : "eBay est."}
-                    </span>
-                    <span>{selectedItem.price_low != null ? `£${selectedItem.price_low}–£${selectedItem.price_high}` : "Unknown"}</span>
-                  </div>
-                  <div>
-                    <span className="text-[#8A7F63] text-xs block">Vinted est.</span>
-                    <span>{selectedItem.vinted_price_low != null ? `£${selectedItem.vinted_price_low}–£${selectedItem.vinted_price_high}` : "Unknown"}</span>
-                  </div>
-                  <div>
-                    <span className="text-[#8A7F63] text-xs block">Active on eBay now</span>
-                    <span>{selectedItem.ebay_active_listings != null ? selectedItem.ebay_active_listings : "Unknown"}</span>
-                  </div>
-                  {selectedItem.comparable_count != null && (
-                    <div>
-                      <span className="text-[#8A7F63] text-xs block">Strong matches</span>
-                      <span>{selectedItem.comparable_count}</span>
-                    </div>
-                  )}
-                  {selectedItem.price_confidence && (
-                    <div>
-                      <span className="text-[#8A7F63] text-xs block">Price confidence</span>
-                      <span className={
-                        selectedItem.price_confidence === "High"
-                          ? "text-[#3F5E42] font-bold"
-                          : selectedItem.price_confidence === "Medium"
-                          ? "text-[#A9822E] font-bold"
-                          : "text-[#A63A2E] font-bold"
-                      }>
-                        {selectedItem.price_confidence}
-                      </span>
-                    </div>
-                  )}
-                </div>
-                <p className="text-sm text-[#2B2620]">
-                  {selectedItem.listing_recommendation || "No recommendation returned for this item."}
-                </p>
-              </div>
-            )}
-
-            <div className="mb-3">
-              <StatusBadge item={selectedItem} />
-            </div>
-
-            {selectedItem.status === "processing" && (
-              <div className="mb-4">
-                <p className="text-sm text-[#6B6250] flex items-center gap-2 mb-3">
-                  <Loader2 size={14} className="animate-spin" />
-                  Writing the ad up now — check back in a moment.
-                </p>
-                <p className="text-xs text-[#8A7F63] mb-2">
-                  Normally finishes in under a minute. Taking much longer usually means the tab that started it was closed or lost connection before it finished — in that case nothing will ever complete it on its own.
-                </p>
-                <button
-                  onClick={() => retryItem(selectedItem)}
-                  className="flex items-center gap-1.5 text-xs font-medium bg-[#A9822E]/15 text-[#A9822E] px-2.5 py-1.5 rounded-md"
-                >
-                  <RefreshCw size={12} /> Restart processing
-                </button>
-              </div>
-            )}
-
-            {selectedItem.status === "error" && (
-              <div className="bg-[#A63A2E]/10 border border-[#A63A2E]/30 rounded-sm p-3 mb-4 flex items-start gap-2">
-                <AlertCircle size={16} className="text-[#A63A2E] shrink-0 mt-0.5" />
-                <div className="flex-1">
-                  <p className="text-sm text-[#A63A2E] mb-2">Couldn't generate an ad for this item.</p>
-                  {selectedItem.error_detail && (
-                    <p className="text-xs text-[#A63A2E]/80 font-mono mb-2">{selectedItem.error_detail}</p>
-                  )}
-                  <button onClick={() => retryItem(selectedItem)} className="flex items-center gap-1.5 text-xs font-medium bg-[#A63A2E]/15 px-2.5 py-1.5 rounded-md">
-                    <RefreshCw size={12} /> Retry
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {selectedItem.status === "sold" && (
-              <div className="flex flex-col gap-4">
-                <div className={`rounded-sm border p-4 ${selectedItem.posted_at ? "bg-[#3F5E42]/10 border-[#3F5E42]/40" : "bg-[#A63A2E]/10 border-[#A63A2E]/40"}`}>
-                  <p className="text-sm text-[#2B2620] font-medium mb-3">{selectedItem.title}</p>
-                  <div className="flex flex-wrap gap-x-6 gap-y-2 font-mono text-sm">
-                    <div>
-                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">
-                        Sold for{(selectedItem.quantity || 1) > 1 ? " (per item)" : ""}
-                      </span>
-                      <span>£{selectedItem.sale_price ?? "—"}</span>
-                    </div>
-                    <div>
-                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">
-                        You paid{(selectedItem.quantity || 1) > 1 ? " (per item)" : ""}
-                      </span>
-                      <span>£{selectedItem.cost_price ?? "—"}</span>
-                    </div>
-                    {(selectedItem.quantity || 1) > 1 && (
-                      <div>
-                        <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Units sold</span>
-                        <span>{effectiveQuantitySold(selectedItem)} of {selectedItem.quantity}</span>
-                      </div>
-                    )}
-                    {selectedItem.sale_price != null && selectedItem.cost_price != null && (
-                      <div>
-                        <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">
-                          {(selectedItem.quantity || 1) > 1 ? "Total profit" : "Profit"}
-                        </span>
-                        <span className="text-[#3F5E42] font-bold">
-                          £{((selectedItem.sale_price - selectedItem.cost_price) * effectiveQuantitySold(selectedItem)).toFixed(2)}
-                        </span>
-                      </div>
-                    )}
-                    {selectedItem.sold_platform && (
-                      <div>
-                        <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Platform</span>
-                        <span>{selectedItem.sold_platform}</span>
-                      </div>
-                    )}
-                    {selectedItem.sold_at && (
-                      <div>
-                        <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Sold date</span>
-                        <span>{fmtDate(selectedItem.sold_at)}</span>
-                      </div>
-                    )}
-                    <div>
-                      <span className="text-[#8A7F63] uppercase text-xs tracking-wide block">Posting</span>
-                      <span className={selectedItem.posted_at ? "text-[#3F5E42] font-bold" : "text-[#A63A2E] font-bold"}>
-                        {selectedItem.posted_at ? `Posted ${fmtDate(selectedItem.posted_at)}` : "Ready for posting"}
-                      </span>
-                    </div>
-                  </div>
-                  {selectedItem.posted_at && (
-                    <p className="text-xs text-[#8A7F63] mt-3">
-                      Photos were cleared to free up storage once this was posted — the sale record above (price, cost, dates) is kept for good.
-                    </p>
-                  )}
-                </div>
-                {!selectedItem.posted_at && (
-                  <button
-                    onClick={() => confirmPosted(selectedItem)}
-                    className="w-full py-2.5 rounded bg-[#A9822E] text-white font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
-                  >
-                    <Check size={15} />
-                    Confirm item posted
-                  </button>
-                )}
-                <button
-                  onClick={() => unmarkSold(selectedItem)}
-                  className="w-full py-2.5 rounded bg-[#DCD4BC] text-[#2B2620] font-medium flex items-center justify-center gap-2 active:scale-[0.98] transition"
-                >
-                  <RefreshCw size={15} />
-                  Mark as Active again
-                </button>
-              </div>
-            )}
-
-            {soldFormFor && (
-              <div className="fixed inset-0 bg-[#2B2620]/60 z-30 flex items-end sm:items-center justify-center p-4">
-                <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-5 w-full max-w-sm">
-                  <p className="font-serif text-lg mb-1">Mark "{soldFormFor.title}" as sold</p>
-                  {(soldFormFor.quantity || 1) - (soldFormFor.quantity_sold || 0) > 1 && (
-                    <p className="text-xs text-[#8A7F63] mb-3">
-                      {(soldFormFor.quantity || 1) - (soldFormFor.quantity_sold || 0)} left in stock — prices below are per item.
-                    </p>
-                  )}
-                  <div className="flex flex-col gap-3">
-                    <div>
-                      <label className="text-xs text-[#8A7F63] mb-1 block">Sold on which platform?</label>
-                      <div className="flex gap-2 flex-wrap">
-                        {["eBay", "Vinted", "Depop", "Other"].map((p) => (
-                          <button
-                            key={p}
-                            type="button"
-                            onClick={() => setSoldPlatformInput(p)}
-                            className={`px-3 py-1.5 rounded-sm text-sm font-medium border transition ${
-                              soldPlatformInput === p
-                                ? "bg-[#3F5E42]/15 border-[#3F5E42]/40 text-[#3F5E42]"
-                                : "bg-[#EDE6D6] border-[#C9BFA3] text-[#6B6250]"
-                            }`}
-                          >
-                            {p}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    {(soldFormFor.quantity || 1) - (soldFormFor.quantity_sold || 0) > 1 && (
-                      <div>
-                        <label className="text-xs text-[#8A7F63] mb-1 block">How many sold?</label>
-                        <input
-                          type="number"
-                          min={1}
-                          max={(soldFormFor.quantity || 1) - (soldFormFor.quantity_sold || 0)}
-                          value={soldQtyInput}
-                          onChange={(e) => setSoldQtyInput(e.target.value)}
-                          className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
-                        />
-                      </div>
-                    )}
-                    <div>
-                      <label className="text-xs text-[#8A7F63] mb-1 block">
-                        Sold for (£){(soldFormFor.quantity || 1) > 1 ? " — per item" : ""}
-                      </label>
-                      <input
-                        type="number"
-                        value={soldPriceInput}
-                        onChange={(e) => setSoldPriceInput(e.target.value)}
-                        className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
-                        autoFocus
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs text-[#8A7F63] mb-1 block">You paid for it (£) — optional, for profit stats</label>
-                      <input
-                        type="number"
-                        value={costPriceInput}
-                        onChange={(e) => setCostPriceInput(e.target.value)}
-                        className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm font-mono"
-                      />
-                    </div>
-                  </div>
-                  <div className="flex gap-2 mt-5">
-                    <button
-                      onClick={() => setSoldFormFor(null)}
-                      className="flex-1 py-2.5 rounded bg-[#DCD4BC] text-[#2B2620] font-medium"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={confirmSold}
-                      disabled={!soldPlatformInput}
-                      className="flex-1 py-2.5 rounded bg-[#A9822E] text-[#2B2620] font-bold disabled:opacity-40"
-                    >
-                      Confirm
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {selectedItem.status === "needs_size" && (
-              <div className="bg-[#A9822E]/10 border border-[#A9822E]/40 rounded-sm p-4 mb-4">
-                <p className="font-serif text-lg mb-1">What size is this?</p>
-                <p className="text-xs text-[#8A7F63] mb-3">
-                  The AI couldn't read a size from the photos, and can't write an accurate listing without it. Enter it to continue.
-                </p>
-                <input
-                  value={sizeGateInput}
-                  onChange={(e) => setSizeGateInput(e.target.value)}
-                  placeholder="e.g. UK 10, Men's L, EU 42"
-                  className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm mb-3"
-                  autoFocus
-                />
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => confirmSizeGate(false)}
-                    className="flex-1 py-2.5 rounded bg-[#DCD4BC] text-[#2B2620] font-medium text-sm"
-                  >
-                    Not sure / skip
-                  </button>
-                  <button
-                    onClick={() => confirmSizeGate(true)}
-                    disabled={!sizeGateInput.trim()}
-                    className="flex-1 py-2.5 rounded bg-[#A9822E] text-[#2B2620] font-bold disabled:opacity-40"
-                  >
-                    Confirm size
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {selectedItem.status === "ready" && editDraft && (
-              <>
-                {(selectedItem.quantity || 1) > 1 && (
-                  <div className="bg-[#8A7F63]/10 border border-[#8A7F63]/30 rounded-sm p-3 mb-5 flex items-center justify-between">
-                    <span className="text-sm text-[#2B2620]">
-                      {(selectedItem.quantity || 1) - (selectedItem.quantity_sold || 0)} of {selectedItem.quantity} left in stock
-                    </span>
-                    {(selectedItem.quantity_sold || 0) > 0 && (
-                      <span className="text-xs font-mono text-[#8A7F63]">{selectedItem.quantity_sold} sold so far</span>
-                    )}
-                  </div>
-                )}
-
-                {needsPosting(selectedItem) && (
-                  <div className="bg-[#A63A2E]/10 border border-[#A63A2E]/40 rounded-sm p-3 mb-5 flex items-center justify-between gap-3">
-                    <span className="text-sm font-bold text-[#A63A2E]">
-                      {selectedItem.quantity_sold || 0} sold, needs posting — rest stays listed
-                    </span>
-                    <button
-                      onClick={() => confirmPosted(selectedItem)}
-                      className="shrink-0 py-2 px-3 rounded bg-[#A9822E] text-white font-bold text-sm flex items-center gap-1.5 active:scale-[0.98] transition"
-                    >
-                      <Check size={14} />
-                      Posted
-                    </button>
-                  </div>
-                )}
-
-                <ListingHelper item={selectedItem} />
-
-                <ListedToggles item={selectedItem} onToggle={togglePlatform} />
-
-                {(() => {
-                  const pipeline = getPipelineInfo(selectedItem);
-                  if (!pipeline || pipeline.stage === "not_listed") return null;
-                  const flagStyle = FLAG_STYLES[pipeline.flag];
-                  return (
-                    <div className={`rounded-sm border p-3 mb-5 ${pipeline.flag === "none" ? "bg-[#F7F3E8] border-[#C9BFA3]" : flagStyle.card}`}>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs text-[#8A7F63] uppercase tracking-wide">
-                          {PIPELINE_STAGES[pipeline.stage].label} · Day {pipeline.days}
-                        </span>
-                        {pipeline.flag !== "none" && (
-                          <span className={`text-[10px] font-mono uppercase px-1.5 py-0.5 rounded-sm ${flagStyle.badge}`}>
-                            {pipeline.flag === "red" ? "Overdue" : "Due"}
-                          </span>
-                        )}
-                      </div>
-                      {pipeline.stage === "ebay" && !selectedItem.vinted_listed_at && (
-                        pipeline.flag === "none" ? (
-                          <p className="text-sm text-[#8A7F63]">On track — no action needed yet. If it hasn't sold by day 7, add it to Vinted at a reduced price.</p>
-                        ) : (
-                          <p className="text-sm">Day 7 has passed — add it to Vinted (toggle above) at a reduced price.</p>
-                        )
-                      )}
-                      {pipeline.stage === "vinted" && !selectedItem.vinted_reduced_at && (
-                        <button
-                          onClick={() => confirmPipelineAction(selectedItem, "vinted_reduced_at")}
-                          className="w-full mt-1 py-2.5 rounded bg-[#A9822E] text-white font-bold text-sm"
-                        >
-                          Confirm Vinted price reduced
-                        </button>
-                      )}
-                      {pipeline.stage === "reduced" && !selectedItem.relisted_at && (
-                        <button
-                          onClick={() => confirmPipelineAction(selectedItem, "relisted_at")}
-                          className="w-full mt-1 py-2.5 rounded bg-[#A9822E] text-white font-bold text-sm"
-                        >
-                          Confirm relisted / bundled
-                        </button>
-                      )}
-                    </div>
-                  );
-                })()}
-
-                {selectedItem.verify_before_listing?.length > 0 && (
-                  <div className="bg-[#A63A2E]/10 border border-[#A63A2E]/30 rounded-sm p-3 mb-5">
-                    <p className="text-xs font-semibold text-[#A63A2E] uppercase tracking-wide mb-2">
-                      Check before listing — not confirmed from photos
-                    </p>
-                    <ul className="text-sm text-[#2B2620] flex flex-col gap-1">
-                      {selectedItem.verify_before_listing.map((v, i) => (
-                        <li key={i} className="flex gap-2">
-                          <span className="text-[#A63A2E]">·</span>
-                          <span>{v}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {!editing ? (
-                  <button
-                    onClick={() => setEditing(true)}
-                    className="w-full py-2.5 mb-4 rounded bg-[#DCD4BC] text-[#2B2620] font-medium flex items-center justify-center gap-2 active:scale-[0.98] transition"
-                  >
-                    <Pencil size={15} />
-                    Edit details
-                  </button>
-                ) : (
-                  <div className="flex flex-col gap-4 mb-4 border-t border-[#C9BFA3] pt-4">
-                    <div>
-                      <label className="text-xs text-[#8A7F63] mb-1 block">eBay Title</label>
-                      <input
-                        value={editDraft.title || ""}
-                        onChange={(e) => setEditDraft({ ...editDraft, title: e.target.value })}
-                        className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-xs text-[#8A7F63] mb-1 block">Vinted Title</label>
-                      <input
-                        value={editDraft.vinted_title || ""}
-                        onChange={(e) => setEditDraft({ ...editDraft, vinted_title: e.target.value })}
-                        className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-xs text-[#8A7F63] mb-1 block">Price low (£)</label>
-                        <input
-                          type="number"
-                          value={editDraft.price_low ?? ""}
-                          onChange={(e) => setEditDraft({ ...editDraft, price_low: e.target.value === "" ? null : Number(e.target.value) })}
-                          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm tabular-nums"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-[#8A7F63] mb-1 block">Price high (£)</label>
-                        <input
-                          type="number"
-                          value={editDraft.price_high ?? ""}
-                          onChange={(e) => setEditDraft({ ...editDraft, price_high: e.target.value === "" ? null : Number(e.target.value) })}
-                          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm tabular-nums"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-xs text-[#8A7F63] mb-1 block">Category</label>
-                        <input
-                          value={editDraft.category || ""}
-                          onChange={(e) => setEditDraft({ ...editDraft, category: e.target.value })}
-                          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-[#8A7F63] mb-1 block">Condition</label>
-                        <input
-                          value={editDraft.condition || ""}
-                          onChange={(e) => setEditDraft({ ...editDraft, condition: e.target.value })}
-                          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-xs text-[#8A7F63] mb-1 block">Size</label>
-                        <input
-                          value={editDraft.size || ""}
-                          onChange={(e) => setEditDraft({ ...editDraft, size: e.target.value })}
-                          placeholder="e.g. UK 10, Men's L"
-                          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs text-[#8A7F63] mb-1 block">Brand</label>
-                        <input
-                          value={editDraft.brand || ""}
-                          onChange={(e) => setEditDraft({ ...editDraft, brand: e.target.value })}
-                          className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="text-xs text-[#8A7F63] mb-1 block">Box / Category folder</label>
-                      <input
-                        list="edit-batch-suggestions"
-                        value={editDraft.batch || ""}
-                        onChange={(e) => setEditDraft({ ...editDraft, batch: e.target.value })}
-                        placeholder="e.g. Box 1 - leave blank for none"
-                        className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
-                      />
-                      <datalist id="edit-batch-suggestions">
-                        {[...new Set(items.map((i) => i.batch).filter(Boolean))].map((b) => (
-                          <option key={b} value={b} />
-                        ))}
-                      </datalist>
-                    </div>
-
-                    <div>
-                      <label className="text-xs text-[#8A7F63] mb-1 block">Item type</label>
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setEditDraft({ ...editDraft, item_type: "resale" })}
-                          className={`flex-1 py-2 rounded-sm text-sm font-medium border transition ${
-                            (editDraft.item_type || "resale") === "resale"
-                              ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620] font-bold"
-                              : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
-                          }`}
-                        >
-                          Resale stock
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setEditDraft({ ...editDraft, item_type: "personal" })}
-                          className={`flex-1 py-2 rounded-sm text-sm font-medium border transition ${
-                            editDraft.item_type === "personal"
-                              ? "bg-[#7A5980] border-[#7A5980] text-white font-bold"
-                              : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
-                          }`}
-                        >
-                          Personal item
-                        </button>
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="text-xs text-[#8A7F63] mb-1 block">Description</label>
-                      <textarea
-                        value={editDraft.description || ""}
-                        onChange={(e) => setEditDraft({ ...editDraft, description: e.target.value })}
-                        rows={4}
-                        className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm resize-none"
-                      />
-                    </div>
-
-                    {editDraft.notes && (
-                      <div className="bg-[#A9822E]/10 border border-[#A9822E]/20 rounded-sm p-3 text-xs text-[#A9822E]/90">
-                        <span className="font-medium">AI note: </span>
-                        {editDraft.notes}
-                        {editDraft.confidence && <span className="text-[#A9822E]/60"> · confidence: {editDraft.confidence}</span>}
-                      </div>
-                    )}
-
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => {
-                          setEditDraft(selectedItem);
-                          setEditing(false);
-                        }}
-                        className="flex-1 py-3 rounded bg-[#DCD4BC] text-[#2B2620] font-medium"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        onClick={() => {
-                          saveEdits();
-                          setEditing(false);
-                        }}
-                        className="flex-1 py-3 rounded bg-[#DCD4BC] text-[#2B2620] font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
-                      >
-                        <Pencil size={15} />
-                        Save only
-                      </button>
-                    </div>
-                    <button
-                      onClick={refreshWithAI}
-                      className="w-full mt-2 py-3 rounded bg-[#A9822E] text-[#2B2620] font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
-                    >
-                      <RefreshCw size={15} />
-                      Save & refresh title/description with AI
-                    </button>
-                    <p className="text-xs text-[#8A7F63] mt-1.5">
-                      Uses your corrections above (size, category, condition, brand) as confirmed fact and rewrites the title and description to match.
-                    </p>
-                  </div>
-                )}
-
-                <button
-                  onClick={() => openSoldForm(selectedItem)}
-                  className="w-full py-2.5 rounded bg-[#A9822E] text-[#2B2620] font-bold flex items-center justify-center gap-2 active:scale-[0.98] transition"
-                >
-                  <Check size={15} />
-                  Mark as Sold
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
+    const promptText = isQuick ? QUICK_PROMPT : buildFullPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings);
+
+    const body = {
+      // Quick pass used to run on Haiku to keep it cheap, but that's what was
+      // causing wrong (not just missing) sizes - e.g. reading "36A" off a
+      // label as "36B", a fine-print misread Haiku is meaningfully more prone
+      // to than Sonnet. A wrong size slips straight through (the app only
+      // blocks on a MISSING size, not a wrong one) and ships in the listing,
+      // which is worse than the item just needing a manual size entry. Sizes
+      // must auto-fill correctly with no manual confirm step, so accuracy
+      // beats the small cost saving here - both passes run on Sonnet now.
+      model: "claude-sonnet-5",
+      // Raised from 4000 - with two titles plus everything else now asked
+      // for, a response that ran long (more eBay comparables to score, a
+      // longer notes field, a bigger verify_before_listing list) could hit
+      // the old ceiling and get cut off mid-JSON with no closing brace,
+      // which is what the "No JSON found in AI response" error actually
+      // was (see the stop_reason check below for a clearer message on this
+      // specific failure going forward).
+      max_tokens: isQuick ? 300 : 6000,
+      messages: [
+        {
+          role: "user",
+          content: [...imageBlocks, { type: "text", text: promptText }],
+        },
+      ],
+    };
+    // Only give the model web search if we don't already have real eBay data -
+    // if we do, it still needs ONE search for Vinted, so keep it either way,
+    // just capped at one use to control cost.
+    if (!isQuick) {
+      body.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 1 }];
+    }
+
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const detail = await response.text();
+      console.error("Anthropic API error:", response.status, detail);
+      let reason = detail.slice(0, 200);
+      try {
+        const parsed = JSON.parse(detail);
+        reason = parsed?.error?.message || reason;
+      } catch {}
+      return res.status(502).json({ error: `AI request failed (Anthropic HTTP ${response.status}: ${reason})` });
+    }
+
+    const data = await response.json();
+    // If the model ran out of output budget before finishing, the response
+    // gets cut off mid-JSON (no closing brace) and extractJson below would
+    // otherwise throw the generic, confusing "No JSON found" error. Catch
+    // this specific case here with a clearer message instead.
+    if (data.stop_reason === "max_tokens") {
+      console.error("Anthropic response hit max_tokens before finishing:", JSON.stringify(data).slice(0, 500));
+      return res.status(502).json({
+        error:
+          "The AI's response got cut off before it finished (ran out of output budget) - this usually clears up on Retry. If it keeps happening on this item, let me know.",
+      });
+    }
+    const text = (data.content || [])
+      .map((b) => b.text || "")
+      .join("\n")
+      .trim();
+
+    let result;
+    try {
+      result = extractJson(text);
+    } catch (parseErr) {
+      console.error("JSON extraction failed. Raw text:", text);
+      return res.status(502).json({ error: parseErr.message });
+    }
+    if (!isQuick) {
+      result._usedRealEbayData = !!ebayListingsBlock;
+      result._ebayTotalListings = ebayTotalListings;
+
+      const pricing = computeComparablePricing(ebayResults, result.ebay_comparable_scores);
+      if (pricing) {
+        result.comparable_count = pricing.comparable_count;
+        result.price_confidence = pricing.price_confidence;
+        if (pricing.comparable_count > 0) {
+          // Strong comparables found - these override the model's own
+          // estimate, which was only ever a fallback for this case.
+          result.estimated_price_low = pricing.price_low;
+          result.estimated_price_high = pricing.price_high;
+          result.recommended_price = pricing.recommended_price;
+          if (pricing.comparable_count < 3) {
+            result.notes = `${result.notes ? result.notes + " " : ""}Only ${pricing.comparable_count} strong eBay comparable(s) found - price is a rough steer, worth checking manually.`;
+          }
+        } else {
+          result.notes = `${result.notes ? result.notes + " " : ""}No strong eBay comparables found among the listings pulled - price falls back to the AI's own general estimate.`;
+        }
+      }
+      // ebay_comparable_scores was only needed for the price math above -
+      // no reason to store the raw per-listing tiers on the item itself.
+      delete result.ebay_comparable_scores;
+    }
+    return res.status(200).json(result);
+  } catch (err) {
+    console.error("Analyze route failed:", err);
+    return res.status(500).json({ error: "Internal error analysing item" });
+  }
 }
