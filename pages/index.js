@@ -9,7 +9,7 @@ const PHOTO_BUCKET = "item-photos";
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v5";
+const APP_VERSION = "v6";
 
 // ---------- storage helpers ----------
 
@@ -252,6 +252,25 @@ async function analyzeItem(photos, mode, confirmedFields, ebaySearchQuery) {
   return res.json();
 }
 
+// Text-only - no photos needed, just each item's already-written listing
+// title/size, so this is quick and cheap compared to the per-item AI pass.
+async function analyzeBundle(bundleItems, bundleCategory, bundleSizeLabel) {
+  const res = await fetch("/api/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "bundle", bundleItems, bundleCategory, bundleSizeLabel }),
+  });
+  if (!res.ok) {
+    let detail = "AI request failed";
+    try {
+      const body = await res.json();
+      detail = body.error || detail;
+    } catch {}
+    throw new Error(`${detail} (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
 // ---------- UI bits ----------
 
 function SunflowerIcon({ size = 16, className = "" }) {
@@ -397,6 +416,32 @@ function CopyField({ label, value, charLimit }) {
       </div>
       <p className="text-sm text-[#2B2620] whitespace-pre-wrap">{value || "—"}</p>
     </div>
+  );
+}
+
+// Small inline copy button for editable fields (CopyField above is for
+// read-only display) - used on the bundle title/description so each can be
+// copied separately straight into Vinted's own title/description boxes.
+function InlineCopyButton({ text }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text || "");
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {}
+  };
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      className={`flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-md transition ${
+        copied ? "bg-[#3F5E42]/20 text-[#3F5E42]" : "bg-[#DCD4BC] text-[#2B2620]"
+      }`}
+    >
+      {copied ? <Check size={12} /> : <Copy size={12} />}
+      {copied ? "Copied" : "Copy"}
+    </button>
   );
 }
 
@@ -1146,6 +1191,8 @@ export default function Home() {
   const [bundleDescInput, setBundleDescInput] = useState("");
   const [bundleMainPhoto, setBundleMainPhoto] = useState("");
   const [savingBundle, setSavingBundle] = useState(false);
+  const [generatingBundle, setGeneratingBundle] = useState(false);
+  const [bundleGenError, setBundleGenError] = useState("");
   const [soldTypeFilter, setSoldTypeFilter] = useState("all");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -1300,12 +1347,64 @@ export default function Home() {
     fetchBundleRecords();
   }, [unlocked, fetchBargains, fetchBargainSettings, fetchLastBackup, fetchBundleRecords]);
 
+  const persistBundle = async (group, title, description, mainPhoto) => {
+    const payload = {
+      group_key: group.key,
+      title: (title || "").trim(),
+      description: (description || "").trim(),
+      main_photo: mainPhoto || null,
+      updated_at: new Date().toISOString(),
+    };
+    const { data, error } = await supabase.from("bundles").upsert(payload, { onConflict: "group_key" }).select().single();
+    if (error) throw error;
+    setBundleRecords((prev) => ({ ...prev, [group.key]: data }));
+    return data;
+  };
+
+  // Writes the title/description with AI, same as individual items -
+  // no manual "generate" click needed, it just happens - and saves the
+  // result straight away so a fresh bundle is ready to copy into Vinted
+  // the moment you open it. mainPhoto is passed in rather than read from
+  // state, since state set moments earlier in the same call isn't visible
+  // yet inside this async function.
+  const runBundleGeneration = async (group, mainPhoto, { autoSave } = {}) => {
+    setBundleGenError("");
+    setGeneratingBundle(true);
+    try {
+      const gen = await analyzeBundle(
+        group.items.map((e) => ({ title: e.title, size: e.size })),
+        group.items[0].category,
+        group.bucket
+      );
+      const title = gen.title || `${group.items.length}× ${group.items[0].category} · Size ${group.bucket}`;
+      const description = gen.description || "";
+      setBundleTitleInput(title);
+      setBundleDescInput(description);
+      if (autoSave) {
+        await persistBundle(group, title, description, mainPhoto);
+      }
+    } catch (err) {
+      console.error("Bundle generation failed:", err);
+      setBundleGenError(err.message || "Couldn't write a title/description automatically - you can still write your own below.");
+    } finally {
+      setGeneratingBundle(false);
+    }
+  };
+
   const openBundle = (group) => {
     setSelectedBundle(group);
+    setBundleGenError("");
     const rec = bundleRecords[group.key];
-    setBundleTitleInput(rec?.title ?? `${group.items.length}× ${group.items[0].category} · Size ${group.bucket}`);
-    setBundleDescInput(rec?.description ?? "");
-    setBundleMainPhoto(rec?.main_photo ?? group.items[0]?.thumbnail ?? "");
+    const mainPhoto = rec?.main_photo ?? group.items[0]?.thumbnail ?? "";
+    setBundleMainPhoto(mainPhoto);
+    if (rec?.title) {
+      setBundleTitleInput(rec.title);
+      setBundleDescInput(rec.description || "");
+      return;
+    }
+    setBundleTitleInput(`${group.items.length}× ${group.items[0].category} · Size ${group.bucket}`);
+    setBundleDescInput("");
+    runBundleGeneration(group, mainPhoto, { autoSave: true });
   };
 
   const closeBundle = () => setSelectedBundle(null);
@@ -1313,22 +1412,16 @@ export default function Home() {
   const saveBundle = async () => {
     if (!selectedBundle) return;
     setSavingBundle(true);
-    const payload = {
-      group_key: selectedBundle.key,
-      title: bundleTitleInput.trim(),
-      description: bundleDescInput.trim(),
-      main_photo: bundleMainPhoto || null,
-      updated_at: new Date().toISOString(),
-    };
-    const { data, error } = await supabase.from("bundles").upsert(payload, { onConflict: "group_key" }).select().single();
-    setSavingBundle(false);
-    if (error) {
-      alert("Couldn't save this bundle: " + error.message);
-      return;
+    try {
+      await persistBundle(selectedBundle, bundleTitleInput, bundleDescInput, bundleMainPhoto);
+      setSelectedBundle(null);
+    } catch (err) {
+      alert("Couldn't save this bundle: " + err.message);
+    } finally {
+      setSavingBundle(false);
     }
-    setBundleRecords((prev) => ({ ...prev, [selectedBundle.key]: data }));
-    setSelectedBundle(null);
   };
+
 
   const saveBargainSettings = async () => {
     if (!bargainSettingsDraft) return;
@@ -2735,26 +2828,56 @@ export default function Home() {
                   <div className="fixed inset-0 bg-[#2B2620]/60 z-30 flex items-end sm:items-center justify-center p-4">
                     <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto">
                       <p className="font-serif text-lg mb-1">Bundle details</p>
-                      <p className="text-xs text-[#8A7F63] mb-4">
+                      <p className="text-xs text-[#8A7F63] mb-1">
                         {selectedBundle.items.length} items · {selectedBundle.items[0].category} · Size {selectedBundle.bucket}
                       </p>
+                      <p className="text-xs text-[#8A7F63] mb-4">
+                        {generatingBundle
+                          ? "Writing a title and description with AI…"
+                          : "Written automatically - edit anything below, then Save. Each field has its own Copy button so you can paste title and description straight into Vinted's own boxes."}
+                      </p>
+                      {bundleGenError && (
+                        <p className="text-xs text-[#A63A2E] bg-[#A63A2E]/8 border border-[#A63A2E]/30 rounded-sm px-3 py-2 mb-3">
+                          {bundleGenError}
+                        </p>
+                      )}
                       <div className="flex flex-col gap-3">
                         <div>
-                          <label className="text-xs text-[#8A7F63] mb-1 block">Title</label>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-xs text-[#8A7F63]">Title</label>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => runBundleGeneration(selectedBundle, bundleMainPhoto, { autoSave: true })}
+                                disabled={generatingBundle}
+                                className="text-xs font-medium text-[#A9822E] disabled:opacity-40"
+                              >
+                                {generatingBundle ? "Writing…" : "Regenerate"}
+                              </button>
+                              <InlineCopyButton text={bundleTitleInput} />
+                            </div>
+                          </div>
                           <input
                             value={bundleTitleInput}
                             onChange={(e) => setBundleTitleInput(e.target.value)}
-                            className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
+                            disabled={generatingBundle}
+                            placeholder={generatingBundle ? "Writing…" : ""}
+                            className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm disabled:opacity-60"
                             autoFocus
                           />
                         </div>
                         <div>
-                          <label className="text-xs text-[#8A7F63] mb-1 block">Description</label>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-xs text-[#8A7F63]">Description</label>
+                            <InlineCopyButton text={bundleDescInput} />
+                          </div>
                           <textarea
                             value={bundleDescInput}
                             onChange={(e) => setBundleDescInput(e.target.value)}
+                            disabled={generatingBundle}
+                            placeholder={generatingBundle ? "Writing…" : ""}
                             rows={4}
-                            className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm resize-none"
+                            className="w-full bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm resize-none disabled:opacity-60"
                           />
                         </div>
                         <div>
