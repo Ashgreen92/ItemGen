@@ -9,7 +9,7 @@ const PHOTO_BUCKET = "item-photos";
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v7";
+const APP_VERSION = "v9";
 
 // ---------- storage helpers ----------
 
@@ -1199,6 +1199,8 @@ export default function Home() {
   const [currentQuantity, setCurrentQuantity] = useState(1);
   const [currentItemType, setCurrentItemType] = useState("resale");
   const [batchFilter, setBatchFilter] = useState("all");
+  const [moveTargetBox, setMoveTargetBox] = useState("");
+  const [movingBox, setMovingBox] = useState(false);
   const [stockSearch, setStockSearch] = useState("");
   const [bundleFilterGender, setBundleFilterGender] = useState("all");
   const [bundleFilterGarment, setBundleFilterGarment] = useState("all");
@@ -1371,6 +1373,12 @@ export default function Home() {
       title: (title || "").trim(),
       description: (description || "").trim(),
       main_photo: mainPhoto || null,
+      // A snapshot of which items were actually in the bundle at save time -
+      // the public preview link shows exactly these, not whatever happens to
+      // match the category+size at the moment someone opens the link, so a
+      // buyer never sees the bundle's contents shift under them after
+      // they've been sent the link.
+      item_ids: group.items.map((e) => e.id),
       updated_at: new Date().toISOString(),
     };
     const { data, error } = await supabase.from("bundles").upsert(payload, { onConflict: "group_key" }).select().single();
@@ -2068,6 +2076,29 @@ export default function Home() {
     await supabase.from("items").delete().eq("id", id);
     fetchItems();
     closeItem();
+  };
+
+  // Bulk-reassigns every item currently tagged with one box (batch) to a
+  // different one in a single update - for "box was low so I decanted into
+  // a different box" style moves, rather than editing items one by one.
+  // Works on ALL items with that batch value regardless of status, since a
+  // physical box move isn't limited to active stock.
+  const moveBatch = async (fromBatch, toBatchRaw) => {
+    const toBatch = toBatchRaw.trim();
+    if (!toBatch || toBatch === fromBatch) return;
+    const ids = items.filter((e) => e.batch === fromBatch).map((e) => e.id);
+    if (!ids.length) return;
+    if (!window.confirm(`Move all ${ids.length} item(s) from "${fromBatch}" to "${toBatch}"?`)) return;
+    setMovingBox(true);
+    const { error } = await supabase.from("items").update({ batch: toBatch }).in("id", ids);
+    setMovingBox(false);
+    if (error) {
+      alert("Couldn't move stock: " + error.message);
+      return;
+    }
+    setBatchFilter(toBatch);
+    setMoveTargetBox("");
+    fetchItems();
   };
 
   if (!checkedLock) return null;
@@ -2846,6 +2877,9 @@ export default function Home() {
 
                 {selectedBundle && (() => {
                   const bundlePricing = computeBundlePricing(selectedBundle.items);
+                  const savedRecord = bundleRecords[selectedBundle.key];
+                  const previewLink =
+                    typeof window !== "undefined" ? `${window.location.origin}/bundle/${encodeURIComponent(selectedBundle.key)}` : "";
                   return (
                   <div className="fixed inset-0 bg-[#2B2620]/60 z-30 flex items-end sm:items-center justify-center p-4">
                     <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto">
@@ -2853,6 +2887,32 @@ export default function Home() {
                       <p className="text-xs text-[#8A7F63] mb-3">
                         {selectedBundle.items.length} items · {selectedBundle.items[0].category} · Size {selectedBundle.bucket}
                       </p>
+
+                      {savedRecord ? (
+                        <div className="flex items-center justify-between gap-2 bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2 mb-3">
+                          <div className="min-w-0">
+                            <p className="text-[10px] uppercase tracking-wide text-[#8A7F63]">Buyer preview link</p>
+                            <p className="text-xs text-[#2B2620] truncate">
+                              See exactly what's in this bundle - photos, title, description only, no prices.
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <a
+                              href={`/bundle/${encodeURIComponent(selectedBundle.key)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs font-medium px-2 py-1 rounded-md bg-[#DCD4BC] text-[#2B2620]"
+                            >
+                              Open
+                            </a>
+                            <InlineCopyButton text={previewLink} />
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-[#8A7F63] mb-3">
+                          Save this bundle to get a link buyers can open to see what's actually in it.
+                        </p>
+                      )}
 
                       {bundlePricing && (
                         <div className="flex items-center justify-between bg-[#3F5E42]/8 border border-[#3F5E42]/30 rounded-sm px-3 py-2 mb-3">
@@ -3288,27 +3348,56 @@ export default function Home() {
           {(() => {
             const batches = [...new Set(items.map((i) => i.batch).filter(Boolean))].sort();
             return batches.length > 0 ? (
-              <div className="flex flex-wrap gap-2 mb-4">
-                <button
-                  onClick={() => setBatchFilter("all")}
-                  className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
-                    batchFilter === "all" ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
-                  }`}
-                >
-                  All batches
-                </button>
-                {batches.map((b) => (
+              <>
+                <div className="flex flex-wrap gap-2 mb-2">
                   <button
-                    key={b}
-                    onClick={() => setBatchFilter(b)}
+                    onClick={() => setBatchFilter("all")}
                     className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
-                      batchFilter === b ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
+                      batchFilter === "all" ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
                     }`}
                   >
-                    {b} ({items.filter((i) => i.batch === b && i.status !== "sold").length})
+                    All boxes
                   </button>
-                ))}
-              </div>
+                  {batches.map((b) => (
+                    <button
+                      key={b}
+                      onClick={() => setBatchFilter(b)}
+                      className={`px-3 py-1.5 rounded-sm text-xs font-mono uppercase tracking-wide border transition ${
+                        batchFilter === b ? "bg-[#A9822E] border-[#A9822E] text-[#2B2620]" : "bg-[#F7F3E8] border-[#C9BFA3] text-[#6B6250]"
+                      }`}
+                    >
+                      {b} ({items.filter((i) => i.batch === b && i.status !== "sold").length})
+                    </button>
+                  ))}
+                </div>
+
+                {batchFilter !== "all" && (
+                  <div className="flex items-center gap-2 mb-4 bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2">
+                    <span className="text-xs text-[#6B6250] shrink-0">
+                      Move all {items.filter((i) => i.batch === batchFilter).length} item{items.filter((i) => i.batch === batchFilter).length === 1 ? "" : "s"} in "{batchFilter}" to
+                    </span>
+                    <input
+                      list="move-box-suggestions"
+                      value={moveTargetBox}
+                      onChange={(e) => setMoveTargetBox(e.target.value)}
+                      placeholder="e.g. Box 2"
+                      className="flex-1 min-w-0 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-2 py-1.5 text-sm"
+                    />
+                    <datalist id="move-box-suggestions">
+                      {batches.filter((b) => b !== batchFilter).map((b) => (
+                        <option key={b} value={b} />
+                      ))}
+                    </datalist>
+                    <button
+                      onClick={() => moveBatch(batchFilter, moveTargetBox)}
+                      disabled={movingBox || !moveTargetBox.trim() || moveTargetBox.trim() === batchFilter}
+                      className="shrink-0 px-3 py-1.5 rounded-sm text-xs font-bold bg-[#A9822E] text-[#2B2620] disabled:opacity-40"
+                    >
+                      {movingBox ? "Moving…" : "Move"}
+                    </button>
+                  </div>
+                )}
+              </>
             ) : null;
           })()}
 
