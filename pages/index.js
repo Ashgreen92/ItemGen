@@ -9,7 +9,7 @@ const PHOTO_BUCKET = "item-photos";
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v9";
+const APP_VERSION = "v10";
 
 // ---------- storage helpers ----------
 
@@ -2081,12 +2081,13 @@ export default function Home() {
   // Bulk-reassigns every item currently tagged with one box (batch) to a
   // different one in a single update - for "box was low so I decanted into
   // a different box" style moves, rather than editing items one by one.
-  // Works on ALL items with that batch value regardless of status, since a
-  // physical box move isn't limited to active stock.
+  // Only touches items still actually IN the box (not sold) - a sold item
+  // has already left the box physically, so moving its batch tag would be
+  // relabelling something that isn't there any more.
   const moveBatch = async (fromBatch, toBatchRaw) => {
     const toBatch = toBatchRaw.trim();
     if (!toBatch || toBatch === fromBatch) return;
-    const ids = items.filter((e) => e.batch === fromBatch).map((e) => e.id);
+    const ids = items.filter((e) => e.batch === fromBatch && e.status !== "sold").map((e) => e.id);
     if (!ids.length) return;
     if (!window.confirm(`Move all ${ids.length} item(s) from "${fromBatch}" to "${toBatch}"?`)) return;
     setMovingBox(true);
@@ -3371,10 +3372,12 @@ export default function Home() {
                   ))}
                 </div>
 
-                {batchFilter !== "all" && (
+                {batchFilter !== "all" && (() => {
+                  const boxCount = items.filter((i) => i.batch === batchFilter && i.status !== "sold").length;
+                  return (
                   <div className="flex items-center gap-2 mb-4 bg-[#EDE6D6] border border-[#C9BFA3] rounded-sm px-3 py-2">
                     <span className="text-xs text-[#6B6250] shrink-0">
-                      Move all {items.filter((i) => i.batch === batchFilter).length} item{items.filter((i) => i.batch === batchFilter).length === 1 ? "" : "s"} in "{batchFilter}" to
+                      Move all {boxCount} item{boxCount === 1 ? "" : "s"} in "{batchFilter}" to
                     </span>
                     <input
                       list="move-box-suggestions"
@@ -3396,7 +3399,8 @@ export default function Home() {
                       {movingBox ? "Moving…" : "Move"}
                     </button>
                   </div>
-                )}
+                  );
+                })()}
               </>
             ) : null;
           })()}
