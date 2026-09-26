@@ -5,11 +5,23 @@ import { supabase } from "../lib/supabaseClient";
 const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra 1", "Extra 2", "Extra 3"];
 const PHOTO_BUCKET = "item-photos";
 
+// The AI never needs the full 1600px display copy to read a label or judge
+// a garment - a smaller version costs meaningfully fewer tokens per photo
+// (Claude bills images roughly by pixel count) with no real loss of
+// legibility for the sizes of text actually printed on tags/labels. A
+// second, smaller copy of each photo is uploaded alongside the full one
+// (same Storage bucket, `-analysis` suffix on the filename) purely for the
+// AI calls; the full 1600px copy stays exactly as-is for display and for
+// whatever you actually upload to eBay/Vinted, so there's no visible
+// quality change to the listing itself.
+const ANALYSIS_PHOTO_WIDTH = 1100;
+const ANALYSIS_PHOTO_QUALITY = 0.8;
+
 // Bump this on every meaningful change to index.js/analyze.js and mention
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v12";
+const APP_VERSION = "v13";
 
 // ---------- storage helpers ----------
 
@@ -231,6 +243,15 @@ async function ensureUnderSizeLimit(photos, maxTotalBytes = 3200000) {
     result[origIdx] = legacyPhotos[j];
   });
   return result;
+}
+
+// Prefer the smaller analysis-only copies for the AI calls (cheaper), but
+// fall back to the full display photos if analysis copies weren't made for
+// this item - either it predates this feature, or something failed to
+// upload one. A length mismatch is treated the same as "not available",
+// rather than risk sending a half-mixed, out-of-order set.
+function pickAnalysisPhotos(analysisPhotos, photos) {
+  return Array.isArray(analysisPhotos) && analysisPhotos.length === photos.length ? analysisPhotos : photos;
 }
 
 async function analyzeItem(photos, mode, confirmedFields, ebaySearchQuery) {
@@ -1254,6 +1275,17 @@ export default function Home() {
       newPhotos[photoIndex] = bustedUrl;
       const updates = { photos: newPhotos };
 
+      // Keep the smaller AI-analysis copy of this photo in sync too, so a
+      // later regenerate doesn't read a stale, un-rotated version - only if
+      // this item actually has analysis copies (older items may not).
+      if (Array.isArray(item.analysis_photos) && item.analysis_photos.length === item.photos.length) {
+        const smallAnalysis = await resizeDataUrl(rotated, ANALYSIS_PHOTO_WIDTH, ANALYSIS_PHOTO_QUALITY);
+        const analysisUrl = await uploadPhotoToStorage(smallAnalysis, `${item.id}/${photoIndex}-analysis.jpg`);
+        const newAnalysisPhotos = [...item.analysis_photos];
+        newAnalysisPhotos[photoIndex] = `${analysisUrl}?t=${Date.now()}`;
+        updates.analysis_photos = newAnalysisPhotos;
+      }
+
       if (photoIndex === 0 && item.thumbnail) {
         const smallRotated = await resizeDataUrl(rotated, 600, 0.65);
         const thumbUrl = await uploadPhotoToStorage(smallRotated, `${item.id}/thumb.jpg`);
@@ -1603,6 +1635,23 @@ export default function Home() {
         photoUrls.push(url);
       }
 
+      // Also upload a smaller copy of each photo purely for the AI calls -
+      // cheaper to analyse, with no effect on the full-size photos above
+      // (those are untouched, still what's displayed and what you'd upload
+      // to a marketplace). If a resize fails for some reason, fall back to
+      // the full-size photo for that one rather than losing the item.
+      const analysisPhotoUrls = [];
+      for (let i = 0; i < currentPhotos.length; i++) {
+        try {
+          const small = await resizeDataUrl(currentPhotos[i], ANALYSIS_PHOTO_WIDTH, ANALYSIS_PHOTO_QUALITY);
+          const url = await uploadPhotoToStorage(small, `${id}/${i}-analysis.jpg`);
+          analysisPhotoUrls.push(url);
+        } catch (err) {
+          console.error("Analysis photo resize/upload failed, using full-size:", err);
+          analysisPhotoUrls.push(photoUrls[i]);
+        }
+      }
+
       const { data, error } = await supabase
         .from("items")
         .insert({
@@ -1610,6 +1659,7 @@ export default function Home() {
           title: "Untitled item",
           status: "processing",
           photos: photoUrls,
+          analysis_photos: analysisPhotoUrls,
           thumbnail,
           batch: currentBatch.trim() || null,
           cost_price: currentCostPrice === "" ? null : Number(currentCostPrice),
@@ -1625,7 +1675,7 @@ export default function Home() {
       setEnhancedFlags([]);
       setCurrentQuantity(1);
       fetchItems();
-      processItem(data.id, photoUrls);
+      processItem(data.id, pickAnalysisPhotos(analysisPhotoUrls, photoUrls));
     } catch (err) {
       console.error("handleNextItem failed:", err);
       alert("Next item failed: " + (err.message || JSON.stringify(err)));
@@ -1702,14 +1752,14 @@ export default function Home() {
     setSelectedItem((s) => ({ ...s, status: "processing" }));
     setEditing(false);
     fetchItems();
-    runFullGeneration(editDraft.id, editDraft.photos, Object.keys(confirmedFields).length ? confirmedFields : null, editDraft.ebay_search_query);
+    runFullGeneration(editDraft.id, pickAnalysisPhotos(editDraft.analysis_photos, editDraft.photos), Object.keys(confirmedFields).length ? confirmedFields : null, editDraft.ebay_search_query);
   };
 
   const retryItem = async (item) => {
     await supabase.from("items").update({ status: "processing" }).eq("id", item.id);
     setSelectedItem({ ...item, status: "processing" });
     fetchItems();
-    processItem(item.id, item.photos);
+    processItem(item.id, pickAnalysisPhotos(item.analysis_photos, item.photos));
   };
 
   const [sizeGateInput, setSizeGateInput] = useState("");
@@ -1721,7 +1771,7 @@ export default function Home() {
     setSelectedItem((s) => ({ ...s, size, status: "processing" }));
     setSizeGateInput("");
     fetchItems();
-    runFullGeneration(item.id, item.photos, size === "Not specified" ? null : { size }, item.ebay_search_query);
+    runFullGeneration(item.id, pickAnalysisPhotos(item.analysis_photos, item.photos), size === "Not specified" ? null : { size }, item.ebay_search_query);
   };
 
   const [soldFormFor, setSoldFormFor] = useState(null);
