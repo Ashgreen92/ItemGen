@@ -6,48 +6,38 @@ const QUICK_PROMPT = `Look at these photos of a single secondhand item. Answer O
   "search_query": "a short, accurate eBay search phrase for this item - brand + item type + any distinguishing detail visible (e.g. 'Nike Air Max 90 trainers mens', 'Emporio Armani navy t-shirt'). No fluff, no size/condition words, just what a buyer would type to find this item."
 }`;
 
-function buildFullPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings) {
-  const cf = confirmedFields || {};
-  let factsNote = "";
-  const lines = [];
-  if (cf.size) lines.push(`Size: ${cf.size}`);
-  if (cf.category) lines.push(`Category/item type: ${cf.category}`);
-  if (cf.condition) lines.push(`Condition: ${cf.condition}`);
-  if (cf.brand) lines.push(`Brand: ${cf.brand}`);
-  if (lines.length) {
-    factsNote = `\n\nThe seller has personally corrected/confirmed the following - treat these as verified fact, not something to guess or second-guess, and write the titles/description consistent with them:\n- ${lines.join("\n- ")}`;
-  }
-
-  const totalNote = ebayTotalListings != null
-    ? ` eBay reports approximately ${ebayTotalListings} total active listings currently matching this search - a high number suggests a competitive/saturated market, a low number suggests this is a more niche item; factor this into your demand read.`
-    : "";
-
+// Split into a STATIC system prompt (identical text on every full-mode call
+// bar one boolean - whether real eBay data is available) and a short
+// DYNAMIC user message (the actual per-item facts/eBay listings). This is
+// purely a cost optimisation: the system prompt is marked cache_control in
+// the handler below, so Anthropic reuses it cheaply across calls instead of
+// re-billing the full instruction text every single item. None of the
+// actual instructions changed in this split - only where each piece lives.
+function buildFullSystemPrompt(hasEbayData) {
   const codeSearchStep = `Step 2: Check what you noted in Step 1 for a style/item code. If you found one, spend your FIRST web search looking it up (search the code itself, optionally with the retailer name if you know it from the label - e.g. "WLFZJ Very", or just "WLFZJ baby clothes" if the retailer isn't clear). A matching result gives you the item's actual original listing - exact product name, brand, and RRP - which is far more reliable than working it out from the photos alone. If you get a genuine match:
 - Treat the product name/brand/material from that listing as OBSERVED FACT for Step 1 purposes (same standing as reading it off the tag yourself), not a guess.
 - If the listing shows a price (current or RRP), that's usable in the title as "RRP £X" exactly like a price printed on the tag would be - it's a real, sourced figure, not an estimate.
 - Say in notes which retailer/listing you matched it to.
 If the code search comes back with nothing clearly matching, say so in notes and fall back to your own visual identification for everything else - don't force a match that isn't genuinely the same item.`;
 
-  const pricingStep = ebayListingsBlock
-    ? `Step 3: Below are REAL current eBay UK active listings for this item, retrieved directly from eBay's own API (not a web search) - genuine, live listings, each tagged with an id like [L1]:
+  const pricingStep = hasEbayData
+    ? `Step 3: Real current eBay UK active listings for this item, retrieved directly from eBay's own API (not a web search) - genuine, live listings, each tagged with an id like [L1] - are provided in the user message below, along with roughly how many total active listings eBay reports matching this search.
 
-${ebayListingsBlock}
-
-For EVERY listing above, judge how well it actually matches THIS exact item (from the photos), using this hierarchy in order of importance: brand -> exact product/model -> garment type -> gender -> size -> condition -> colour/style. Classify each into exactly one tier:
+For EVERY listing shown there, judge how well it actually matches THIS exact item (from the photos), using this hierarchy in order of importance: brand -> exact product/model -> garment type -> gender -> size -> condition -> colour/style. Classify each into exactly one tier:
 - "strong": same brand, same or equivalent product line/model, same garment type, matching gender, a compatible size, and broadly comparable condition - a genuine like-for-like comparable you'd expect to sell for a similar price to this exact item
 - "weak": same general category but meaningfully different in one of the above (different brand, notably different model, wrong size bracket, or a much different condition) - informative but not a tight match
 - "reject": wrong brand, wrong garment type, wrong gender, a bundle/lot listing, an accessory rather than the item itself, or otherwise not a real comparable
 
 Exception to the hierarchy above: if the item carries a licensed character or franchise print/graphic (Disney, Sonic, sports kits, band merch, etc.), treat the specific print/graphic design as close to brand-level importance, not as a minor colour/style detail - a different colourway with a different graphic is effectively a different product, even from the same brand and licence, and should not be scored "strong" just because the brand and character license match. Plain, non-licensed clothing is unaffected - colour/style stays a low-priority factor there as before.
 
-Be strict, not generous - reserve "strong" for genuine matches. Report your tier for every single listing id shown above (even the ones you reject) as a single compact string in ebay_comparable_scores, formatted exactly like "L1:strong,L2:weak,L3:reject,L4:strong" - comma separated, no spaces, one entry per id. Still fill in estimated_price_low/estimated_price_high with your own best-judgement price range as a fallback, in case too few strong matches turn up.${totalNote}
+Be strict, not generous - reserve "strong" for genuine matches. Report your tier for every single listing id shown (even the ones you reject) as a single compact string in ebay_comparable_scores, formatted exactly like "L1:strong,L2:weak,L3:reject,L4:strong" - comma separated, no spaces, one entry per id. Still fill in estimated_price_low/estimated_price_high with your own best-judgement price range as a fallback, in case too few strong matches turn up. If a total active-listings count is given in the user message, factor it into your demand read too - a high number suggests a competitive/saturated market, a low number suggests this is a more niche item.
 
-You have a SECOND web search available too (separate from the code lookup above, if you used one) - use it specifically to check Vinted UK for what this item goes for there, since Vinted has no API. Also use whatever you see (in the eBay data above and your Vinted search) to judge demand: many results / recent activity = high demand, few or stale results = low demand.`
+You have a SECOND web search available too (separate from the code lookup above, if you used one) - use it specifically to check Vinted UK for what this item goes for there, since Vinted has no API. Also use whatever you see (in the eBay data and your Vinted search) to judge demand: many results / recent activity = high demand, few or stale results = low demand.`
     : `Step 3: You have a SECOND web search available too (separate from the code lookup above, if you used one) - use it wisely. Search eBay UK and/or Vinted for comparable items (same or similar brand/model/condition) to see what they're actually selling for right now, on BOTH platforms if your search results cover both. Prioritize sold/completed listings over active asking prices — active listings on both platforms are consistently priced above what items actually sell for, since sellers list high and negotiate down or wait for offers. If your search only turns up active asking prices, treat those as a ceiling, not a target: price toward the lower third of that range rather than the middle or top. Do not guess any price from memory — base it on what you find in search, and err conservative rather than optimistic. Also note roughly how much genuine buyer interest/turnover you saw for this kind of item (many recent sold listings = high demand; mostly old unsold active listings = low demand) - this feeds the "demand" field below. If you didn't use a first search on a code (none was visible), you still only need this one search - don't spend the second unless it adds something.`;
 
   return `You are helping a UK reseller create a marketplace listing from photos of a single secondhand item. The photos follow this order where present: front, then back, then a label/tag close-up, then a condition/flaw detail, then an extra shot. The label/tag close-up, if present, is deliberately a close-up of any label or tag — treat it as your primary source for material and model information; read it carefully rather than guessing from the garment's general appearance.
 
-Step 1: Identify only what you can directly observe. Visible brand logos, colours, and anything legible on a tag or printed on the item itself count as observed. An exact product line name, material composition, or model number does NOT count as observed unless you can actually read it on a visible label/tag in the photos — do not fill these in from a guess at what "looks like" a typical product of that brand. Also note whether a style/item code, product code, or SKU is legible anywhere on a label/tag - many UK retailers print a short reference code on the care label or swing tag (e.g. a code like "WLFZJ" or "J269" on Shop Direct/Very/Littlewoods labels, or similar short alphanumeric codes from other retailers). This is separate from the size and is usually near a barcode.${factsNote}
+Step 1: Identify only what you can directly observe. Visible brand logos, colours, and anything legible on a tag or printed on the item itself count as observed. An exact product line name, material composition, or model number does NOT count as observed unless you can actually read it on a visible label/tag in the photos — do not fill these in from a guess at what "looks like" a typical product of that brand. Also note whether a style/item code, product code, or SKU is legible anywhere on a label/tag - many UK retailers print a short reference code on the care label or swing tag (e.g. a code like "WLFZJ" or "J269" on Shop Direct/Very/Littlewoods labels, or similar short alphanumeric codes from other retailers). This is separate from the size and is usually near a barcode. If the seller has personally corrected/confirmed any facts (size, category, condition, brand), those will be given in the user message below - treat them as verified, not something to guess or second-guess, and write the titles/description consistent with them.
 
 ${codeSearchStep}
 
@@ -56,15 +46,15 @@ ${pricingStep}
 Step 4: Respond with ONLY a JSON object as your final message, no markdown fences, no commentary before or after it, in exactly this shape:
 
 {
-  "title": "the eBay-optimised title, under 80 characters, KEYWORD-DENSE since eBay search matches on title keywords. Only state details you actually observed per Step 1${lines.length ? " (the seller-confirmed facts above may be included)" : ""} — if you're not sure of the exact product line/model, use a generic accurate description instead (e.g. 'Men's Navy T-Shirt' not a specific product line you can't confirm). If Step 2's code search found a genuine match, use the real product name/brand from that listing here as observed fact. Order the keywords: Brand -> Gender -> Condition (only if New with tags or New without tags - use 'BNWT' for New with tags, 'New' for New without tags; omit this element entirely for any used condition, don't state 'Excellent'/'Good'/etc in the title) -> Colour -> Style/material keywords -> Garment type -> Notable feature -> Size — e.g. 'Nike Mens BNWT Black Fleece Zip Hoodie Jacket Large' or, if used, 'Nike Mens Black Fleece Zip Hoodie Jacket Large'. Only include an element in that order if it's actually known/observed; skip any you don't have rather than leaving a gap - New items are a strong selling point and something buyers specifically search for, so never drop it silently just because the title is getting long; drop a lower-priority element (Notable feature first) instead if space is tight. Include an RRP near the end of the title as 'RRP £X' whenever you have a genuinely sourced original price AND the item is New with tags/New without tags - either a price actually legible on a tag/label in the photos, OR a price found via a genuine code-search match in Step 2 (same standing as a tag price, never a Step 3 comp-search estimate) - but only ever if it still fits within the 80-character limit alongside everything else. Skip it entirely rather than guess, estimate, or truncate other important info to fit it in",
+  "title": "the eBay-optimised title, under 80 characters, KEYWORD-DENSE since eBay search matches on title keywords. Only state details you actually observed per Step 1 (any seller-confirmed facts given in the user message may be included) — if you're not sure of the exact product line/model, use a generic accurate description instead (e.g. 'Men's Navy T-Shirt' not a specific product line you can't confirm). If Step 2's code search found a genuine match, use the real product name/brand from that listing here as observed fact. Order the keywords: Brand -> Gender -> Condition (only if New with tags or New without tags - use 'BNWT' for New with tags, 'New' for New without tags; omit this element entirely for any used condition, don't state 'Excellent'/'Good'/etc in the title) -> Colour -> Style/material keywords -> Garment type -> Notable feature -> Size — e.g. 'Nike Mens BNWT Black Fleece Zip Hoodie Jacket Large' or, if used, 'Nike Mens Black Fleece Zip Hoodie Jacket Large'. Only include an element in that order if it's actually known/observed; skip any you don't have rather than leaving a gap - New items are a strong selling point and something buyers specifically search for, so never drop it silently just because the title is getting long; drop a lower-priority element (Notable feature first) instead if space is tight. Include an RRP near the end of the title as 'RRP £X' whenever you have a genuinely sourced original price AND the item is New with tags/New without tags - either a price actually legible on a tag/label in the photos, OR a price found via a genuine code-search match in Step 2 (same standing as a tag price, never a Step 3 comp-search estimate) - but only ever if it still fits within the 80-character limit alongside everything else. Skip it entirely rather than guess, estimate, or truncate other important info to fit it in",
   "vintedTitle": "a SEPARATE, short, natural, clean Vinted-style title for the same item - NOT keyword-stuffed like the eBay title above. Vinted buyers browse and filter by brand/size/condition through Vinted's own structured filters, so cramming keywords into the title just reads as spammy there. Write it the way a normal seller would naturally title a Vinted listing, e.g. 'Nike black zip hoodie' or 'Vintage Levi's denim jacket' - a few natural words, same underlying facts as the eBay title (only what was actually observed per Step 1), but phrased conversationally rather than as a keyword list. If the item is New with tags or New without tags, work that in too the way a real Vinted seller naturally would (e.g. 'BNWT Nike black zip hoodie' or 'Converse black leather trainers, new without tags') - it's one of the first things a buyer looks for and Vinted sellers routinely lead or end a title with it, so don't leave it out just because the eBay title already states condition separately",
-  "description": "2-4 sentence listing description containing ONLY visually confirmed positive descriptive facts${lines.length ? " plus the seller-confirmed facts above" : ""} - brand, style, colour, material, design details. Write it the way a person selling the item would write it - state facts plainly (e.g. 'Size 18½. Polyester-cotton blend.') Never narrate how you know something (no phrases like 'tag confirms', 'as shown in photos', 'visible in the images', 'label indicates', 'seller confirmed') - that reads as an AI wrote it, not a seller. NEVER state what ISN'T visible or wasn't included (no 'no label visible', 'no size tag shown', 'material unknown', etc.). DO NOT mention wear, flaws, stains, damage, fading, or any condition issues in the description at all, even if something looks visibly worn or damaged - the seller reviews every item in hand and adds any real flaws themselves; guessing at flaws from photos has repeatedly been wrong. Keep the description purely descriptive, not evaluative. Anything uncertain about the item's core identity still goes in verify_before_listing, just not condition commentary",
-  "category": "the MOST SPECIFIC real resale subcategory available, not a broad umbrella term - e.g. 'Men's Zip-Up Hoodies' rather than just 'Men's Hoodies & Sweatshirts', 'Women's Skinny Jeans' rather than just 'Women's Jeans'. Being specific here matters for more than just discoverability - a vague category also skews comparable-pricing accuracy, since broader categories pull in a wider, less comparable spread of eBay listings when matching prices. Still only state a specific subcategory if the photos genuinely support it - fall back to the safest accurate broader label rather than guess a specific one you can't confirm.${cf.category ? " The seller has already confirmed this is: " + cf.category + " - use that exact value." : " Be careful with garment TYPE specifically (top vs dress vs jumpsuit vs romper etc.) - only state a specific type if the photos clearly show the item's full length/silhouette. If you can't see enough of the garment to be sure whether it's cropped, full-length, one-piece, etc., use the safest/most generic accurate label and add a note to verify_before_listing rather than confidently asserting the wrong type"}",
-  "condition": "one of: New with tags, New without tags, Excellent, Good, Fair, Well worn. Judge condition on genuine wear/damage only - intentional design fading/distressing (stone-wash, acid-wash, factory-distressed denim, etc.) is not a flaw and shouldn't by itself lower the rating below Excellent/Good if the item is otherwise in good order${cf.condition ? " (seller has confirmed: " + cf.condition + " - use that)" : ""}",
-  "brand": "brand name if visible, else empty string${cf.brand ? " (seller has confirmed: " + cf.brand + " - use that)" : ""}",
+  "description": "2-4 sentence listing description containing ONLY visually confirmed positive descriptive facts (plus any seller-confirmed facts given in the user message) - brand, style, colour, material, design details. Write it the way a person selling the item would write it - state facts plainly (e.g. 'Size 18½. Polyester-cotton blend.') Never narrate how you know something (no phrases like 'tag confirms', 'as shown in photos', 'visible in the images', 'label indicates', 'seller confirmed') - that reads as an AI wrote it, not a seller. NEVER state what ISN'T visible or wasn't included (no 'no label visible', 'no size tag shown', 'material unknown', etc.). DO NOT mention wear, flaws, stains, damage, fading, or any condition issues in the description at all, even if something looks visibly worn or damaged - the seller reviews every item in hand and adds any real flaws themselves; guessing at flaws from photos has repeatedly been wrong. Keep the description purely descriptive, not evaluative. Anything uncertain about the item's core identity still goes in verify_before_listing, just not condition commentary",
+  "category": "the MOST SPECIFIC real resale subcategory available, not a broad umbrella term - e.g. 'Men's Zip-Up Hoodies' rather than just 'Men's Hoodies & Sweatshirts', 'Women's Skinny Jeans' rather than just 'Women's Jeans'. Being specific here matters for more than just discoverability - a vague category also skews comparable-pricing accuracy, since broader categories pull in a wider, less comparable spread of eBay listings when matching prices. Still only state a specific subcategory if the photos genuinely support it - fall back to the safest accurate broader label rather than guess a specific one you can't confirm. If the seller has already confirmed the category in the user message below, use that exact value. Otherwise be careful with garment TYPE specifically (top vs dress vs jumpsuit vs romper etc.) - only state a specific type if the photos clearly show the item's full length/silhouette. If you can't see enough of the garment to be sure whether it's cropped, full-length, one-piece, etc., use the safest/most generic accurate label and add a note to verify_before_listing rather than confidently asserting the wrong type",
+  "condition": "one of: New with tags, New without tags, Excellent, Good, Fair, Well worn. Judge condition on genuine wear/damage only - intentional design fading/distressing (stone-wash, acid-wash, factory-distressed denim, etc.) is not a flaw and shouldn't by itself lower the rating below Excellent/Good if the item is otherwise in good order. If the seller has confirmed condition in the user message below, use that.",
+  "brand": "brand name if visible, else empty string. If the seller has confirmed brand in the user message below, use that.",
   "estimated_price_low": number (GBP, no symbol),
   "estimated_price_high": number (GBP, no symbol),
-  "ebay_comparable_scores": "${ebayListingsBlock ? "compact string like L1:strong,L2:weak,L3:reject - one entry per eBay listing id shown above, comma separated, no spaces, required" : "omit this field entirely, no eBay listings were shown this time"}",
+  "ebay_comparable_scores": "${hasEbayData ? "compact string like L1:strong,L2:weak,L3:reject - one entry per eBay listing id shown in the user message, comma separated, no spaces, required" : "omit this field entirely, no eBay listings were shown this time"}",
   "vinted_price_low": number (GBP, no symbol - what similar items actually go for specifically on Vinted),
   "vinted_price_high": number (GBP, no symbol),
   "demand": "high, medium, or low",
@@ -75,6 +65,35 @@ Step 4: Respond with ONLY a JSON object as your final message, no markdown fence
 }
 
 Never invent a price, material, or product line. Anything you didn't actually see clearly goes in verify_before_listing, not into the titles or description as stated fact.`;
+}
+
+// The short per-item message that goes alongside the photos - just the bits
+// that actually vary call to call (seller-confirmed facts, real eBay data if
+// we have it). Everything else the model needs is in the cached system
+// prompt above.
+function buildFullUserPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings) {
+  const cf = confirmedFields || {};
+  const lines = [];
+  if (cf.size) lines.push(`Size: ${cf.size}`);
+  if (cf.category) lines.push(`Category/item type: ${cf.category}`);
+  if (cf.condition) lines.push(`Condition: ${cf.condition}`);
+  if (cf.brand) lines.push(`Brand: ${cf.brand}`);
+  const factsNote = lines.length
+    ? `The seller has personally corrected/confirmed the following - treat these as verified fact:\n- ${lines.join("\n- ")}`
+    : "";
+
+  const totalNote = ebayTotalListings != null
+    ? ` (eBay reports approximately ${ebayTotalListings} total active listings currently matching this search.)`
+    : "";
+
+  const ebayBlock = ebayListingsBlock
+    ? `Real current eBay UK active listings for this item, referenced as Step 3 in the system instructions:\n\n${ebayListingsBlock}${totalNote}`
+    : "";
+
+  const parts = ["Here are the photos of this item. Follow the system instructions and respond with the JSON object described there."];
+  if (factsNote) parts.push(factsNote);
+  if (ebayBlock) parts.push(ebayBlock);
+  return parts.join("\n\n");
 }
 
 // Bundle listings are text-only - no photos, just the titles/sizes of the
@@ -362,7 +381,10 @@ export default async function handler(req, res) {
       ebayResults = marketData.results || [];
     }
 
-    const promptText = isQuick ? QUICK_PROMPT : buildFullPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings);
+    const hasEbayData = !!ebayListingsBlock;
+    const promptText = isQuick
+      ? QUICK_PROMPT
+      : buildFullUserPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings);
 
     const body = {
       // Quick pass used to run on Haiku to keep it cheap, but that's what was
@@ -389,6 +411,18 @@ export default async function handler(req, res) {
         },
       ],
     };
+    // Full mode's instructions are long but identical on every call bar the
+    // hasEbayData boolean (see buildFullSystemPrompt) - putting them in
+    // `system` with cache_control lets Anthropic reuse that block cheaply
+    // across calls instead of re-billing the whole instruction set as fresh
+    // input every single item. The quick pass's prompt is short enough that
+    // caching it wouldn't earn back the overhead, so it's left as a plain
+    // user-message prompt like before.
+    if (!isQuick) {
+      body.system = [
+        { type: "text", text: buildFullSystemPrompt(hasEbayData), cache_control: { type: "ephemeral" } },
+      ];
+    }
     // Capped at two searches to control cost: one optional search to look
     // up a style/item code off a label (finds the original retail listing -
     // real name, brand, RRP), and one for Vinted/eBay comps. If we already
