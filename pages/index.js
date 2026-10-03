@@ -21,7 +21,7 @@ const ANALYSIS_PHOTO_QUALITY = 0.8;
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v16";
+const APP_VERSION = "v17";
 
 // ---------- storage helpers ----------
 
@@ -2092,6 +2092,7 @@ export default function Home() {
         return;
       }
       if (!fromList) setSelectedItem({ ...item, posted_at: now });
+      else setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, posted_at: now } : x)));
       fetchItems();
       return;
     }
@@ -2132,6 +2133,7 @@ export default function Home() {
       return;
     }
     if (!fromList) setSelectedItem({ ...item, posted_at: now, photos: [], thumbnail: archiveThumbnail });
+    else setItems((prev) => prev.map((x) => (x.id === item.id ? { ...x, posted_at: now, photos: [], thumbnail: archiveThumbnail } : x)));
     fetchItems();
   };
 
@@ -2303,38 +2305,18 @@ export default function Home() {
           {(() => {
             const soldItems = items.filter((e) => e.status === "sold");
             const activeItems = items.filter((e) => e.status !== "sold");
-            // Needs Attention covers everything that's genuinely stuck:
-            // needs_size/error block a listing from happening at all,
-            // ready_for_posting is a sale waiting on you to post it -
-            // needsPosting catches this whether the whole item sold out
-            // (status "sold") or just one unit of a quantity>1 stock entry
-            // (status stays "ready" while the rest is still for sale) -
-            // stale catches stock that's been listed 30+ days without
-            // selling anywhere, and add_to_vinted catches something listed
-            // on eBay 7+ days that hasn't been added to Vinted yet.
-            const needsVintedListing = (e) => {
-              const p = getPipelineInfo(e);
-              return p && p.stage === "ebay" && p.flag !== "none";
-            };
+            // Needs Attention is deliberately short: only things that need an
+            // action from you right now - a sale waiting to be marked posted
+            // (needsPosting covers a fully sold entry AND one unit of a
+            // quantity>1 entry), items missing a size, and items that failed
+            // to process. Stale "not selling" and "add to Vinted" reminders
+            // used to live here too but were noise - they're still visible
+            // per item (pipeline card) and in Stock.
             const needsAttention = items
-              .filter(
-                (e) =>
-                  e.status === "needs_size" ||
-                  e.status === "error" ||
-                  needsPosting(e) ||
-                  isStaleListing(e) ||
-                  needsVintedListing(e)
-              )
+              .filter((e) => e.status === "needs_size" || e.status === "error" || needsPosting(e))
               .map((e) => ({
                 ...e,
-                _reason:
-                  e.status === "needs_size" || e.status === "error"
-                    ? "status"
-                    : needsPosting(e)
-                    ? "ready_for_posting"
-                    : isStaleListing(e)
-                    ? "stale"
-                    : "add_to_vinted",
+                _reason: e.status === "needs_size" || e.status === "error" ? "status" : "ready_for_posting",
               }));
 
             return (
@@ -2392,33 +2374,22 @@ export default function Home() {
                             {e.thumbnail && <img src={e.thumbnail} alt="" className="w-full h-full object-cover" />}
                           </div>
                           <span className="text-sm truncate flex-1">{e.title}</span>
-                          {e._reason === "stale" ? (
-                            <span className="inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm bg-[#A63A2E] text-white">
-                              Not selling
-                            </span>
-                          ) : e._reason === "add_to_vinted" ? (
-                            <span className="inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm bg-[#7A5980] text-white">
-                              Add to Vinted
-                            </span>
-                          ) : e._reason === "ready_for_posting" ? (
-                            <span className="inline-flex items-center gap-2 shrink-0">
-                              <StatusBadge item={e} />
-                              <span
-                                role="button"
-                                tabIndex={0}
-                                onClick={(ev) => {
-                                  ev.stopPropagation();
-                                  if (
-                                    e.status === "sold" &&
-                                    !window.confirm("Mark as posted? This also clears this item's stored photos.")
-                                  )
-                                    return;
-                                  confirmPosted(e, true);
-                                }}
-                                className="text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm border border-[#3F5E42] text-[#3F5E42] bg-[#F7F3E8]"
-                              >
-                                Posted
-                              </span>
+                          {e._reason === "ready_for_posting" ? (
+                            <span
+                              role="button"
+                              tabIndex={0}
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                if (
+                                  e.status === "sold" &&
+                                  !window.confirm("Mark as posted? This also clears this item's stored photos.")
+                                )
+                                  return;
+                                confirmPosted(e, true);
+                              }}
+                              className="shrink-0 text-xs font-mono uppercase tracking-wide px-2.5 py-1 rounded-sm bg-[#A63A2E] text-white"
+                            >
+                              Mark posted
                             </span>
                           ) : (
                             <StatusBadge item={e} />
