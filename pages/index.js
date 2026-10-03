@@ -21,7 +21,7 @@ const ANALYSIS_PHOTO_QUALITY = 0.8;
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v15";
+const APP_VERSION = "v16";
 
 // ---------- storage helpers ----------
 
@@ -2077,7 +2077,7 @@ export default function Home() {
   // (status "sold") - if this is a partial sale on a quantity>1 item, the
   // remaining stock is still listed and still needs its photos, so posting
   // just clears the "needs posting" flag (posted_at) without touching them.
-  const confirmPosted = async (item) => {
+  const confirmPosted = async (item, fromList = false) => {
     const now = new Date().toISOString();
     if (item.status !== "sold") {
       // Same class of bug already hit once before with runFullGeneration
@@ -2091,7 +2091,7 @@ export default function Home() {
         alert("Couldn't mark this posted: " + error.message);
         return;
       }
-      setSelectedItem({ ...item, posted_at: now });
+      if (!fromList) setSelectedItem({ ...item, posted_at: now });
       fetchItems();
       return;
     }
@@ -2131,7 +2131,7 @@ export default function Home() {
       alert("Couldn't mark this posted: " + postError.message);
       return;
     }
-    setSelectedItem({ ...item, posted_at: now, photos: [], thumbnail: archiveThumbnail });
+    if (!fromList) setSelectedItem({ ...item, posted_at: now, photos: [], thumbnail: archiveThumbnail });
     fetchItems();
   };
 
@@ -2399,6 +2399,26 @@ export default function Home() {
                           ) : e._reason === "add_to_vinted" ? (
                             <span className="inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm bg-[#7A5980] text-white">
                               Add to Vinted
+                            </span>
+                          ) : e._reason === "ready_for_posting" ? (
+                            <span className="inline-flex items-center gap-2 shrink-0">
+                              <StatusBadge item={e} />
+                              <span
+                                role="button"
+                                tabIndex={0}
+                                onClick={(ev) => {
+                                  ev.stopPropagation();
+                                  if (
+                                    e.status === "sold" &&
+                                    !window.confirm("Mark as posted? This also clears this item's stored photos.")
+                                  )
+                                    return;
+                                  confirmPosted(e, true);
+                                }}
+                                className="text-xs font-mono uppercase tracking-wide px-2 py-0.5 rounded-sm border border-[#3F5E42] text-[#3F5E42] bg-[#F7F3E8]"
+                              >
+                                Posted
+                              </span>
                             </span>
                           ) : (
                             <StatusBadge item={e} />
