@@ -21,7 +21,7 @@ const ANALYSIS_PHOTO_QUALITY = 0.8;
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v13";
+const APP_VERSION = "v15";
 
 // ---------- storage helpers ----------
 
@@ -560,8 +560,7 @@ function ListedToggles({ item, onToggle }) {
 const PIPELINE_STAGES = {
   not_listed: { label: "Not listed yet" },
   ebay: { label: "Listed on eBay (0-7 Days)" },
-  vinted: { label: "Listed on Vinted (7-21 Days)" },
-  reduced: { label: "Reduced on Vinted (21-90 Days)" },
+  vinted: { label: "Listed on Vinted (7-90 Days)" },
   relist: { label: "Relist (90 Days+)" },
 };
 
@@ -765,7 +764,7 @@ function getSoldInfo(item) {
   return { stage: "posted", flag: "none", label: "Sold", days: null };
 }
 
-// Figures out where an item sits in the eBay -> Vinted -> reduce -> relist cycle,
+// Figures out where an item sits in the eBay -> Vinted -> relist cycle,
 // and whether the next expected action is on-track, due, or overdue - based on
 // whether that action was actually confirmed (a toggle/button), not just elapsed time.
 function getPipelineInfo(item) {
@@ -779,8 +778,7 @@ function getPipelineInfo(item) {
   // Each checkpoint: the day an action is due, and whether it's been confirmed.
   const checkpoints = [
     { dueDay: 7, done: !!item.vinted_listed_at, stageIfNotDone: "ebay" },
-    { dueDay: 21, done: !!item.vinted_reduced_at, stageIfNotDone: "vinted" },
-    { dueDay: 90, done: !!item.relisted_at, stageIfNotDone: "reduced" },
+    { dueDay: 90, done: !!item.relisted_at, stageIfNotDone: "vinted" },
   ];
 
   for (const cp of checkpoints) {
@@ -791,8 +789,7 @@ function getPipelineInfo(item) {
   }
 
   if (daysActive < 7) return { stage: "ebay", days: daysActive, flag: "none" };
-  if (daysActive < 21) return { stage: "vinted", days: daysActive, flag: "none" };
-  if (daysActive < 90) return { stage: "reduced", days: daysActive, flag: "none" };
+  if (daysActive < 90) return { stage: "vinted", days: daysActive, flag: "none" };
   return { stage: "relist", days: daysActive, flag: "none" };
 }
 
@@ -1717,9 +1714,19 @@ export default function Home() {
 
   const saveEdits = async () => {
     if (!editDraft) return;
-    await supabase
+    // Quantity can never go below what's already been sold. If it lands
+    // exactly on the sold count the whole entry is sold out, so flip it to
+    // "sold" - otherwise it just keeps hanging around as active stock (and on
+    // Home) with nothing actually left to sell.
+    const quantitySold = editDraft.quantity_sold || 0;
+    const quantity = Math.max(1, quantitySold, Number(editDraft.quantity) || 1);
+    const soldOut = quantitySold > 0 && quantity <= quantitySold;
+    const status = soldOut ? "sold" : editDraft.status;
+    const { error: saveError } = await supabase
       .from("items")
       .update({
+        quantity,
+        status,
         title: editDraft.title,
         vinted_title: editDraft.vinted_title,
         description: editDraft.description,
@@ -1733,7 +1740,13 @@ export default function Home() {
         item_type: editDraft.item_type,
       })
       .eq("id", editDraft.id);
-    setSelectedItem(editDraft);
+    if (saveError) {
+      alert("Couldn't save changes: " + saveError.message);
+      return;
+    }
+    const saved = { ...editDraft, quantity, status };
+    setEditDraft(saved);
+    setSelectedItem(saved);
     fetchItems();
   };
 
@@ -3843,20 +3856,12 @@ export default function Home() {
                       </div>
                       {pipeline.stage === "ebay" && !selectedItem.vinted_listed_at && (
                         pipeline.flag === "none" ? (
-                          <p className="text-sm text-[#8A7F63]">On track — no action needed yet. If it hasn't sold by day 7, add it to Vinted at a reduced price.</p>
+                          <p className="text-sm text-[#8A7F63]">On track — no action needed yet. If it hasn't sold by day 7, add it to Vinted.</p>
                         ) : (
-                          <p className="text-sm">Day 7 has passed — add it to Vinted (toggle above) at a reduced price.</p>
+                          <p className="text-sm">Day 7 has passed — add it to Vinted (toggle above).</p>
                         )
                       )}
-                      {pipeline.stage === "vinted" && !selectedItem.vinted_reduced_at && (
-                        <button
-                          onClick={() => confirmPipelineAction(selectedItem, "vinted_reduced_at")}
-                          className="w-full mt-1 py-2.5 rounded bg-[#A9822E] text-white font-bold text-sm"
-                        >
-                          Confirm Vinted price reduced
-                        </button>
-                      )}
-                      {pipeline.stage === "reduced" && !selectedItem.relisted_at && (
+                      {pipeline.stage === "vinted" && pipeline.flag !== "none" && !selectedItem.relisted_at && (
                         <button
                           onClick={() => confirmPipelineAction(selectedItem, "relisted_at")}
                           className="w-full mt-1 py-2.5 rounded bg-[#A9822E] text-white font-bold text-sm"
@@ -3986,6 +3991,49 @@ export default function Home() {
                           <option key={b} value={b} />
                         ))}
                       </datalist>
+                    </div>
+
+                    <div>
+                      <label className="text-xs text-[#8A7F63] mb-1 block">
+                        Quantity in stock entry{(editDraft.quantity_sold || 0) > 0 ? ` (${editDraft.quantity_sold} already sold)` : ""}
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditDraft({
+                              ...editDraft,
+                              quantity: Math.max(Math.max(1, editDraft.quantity_sold || 0), (Number(editDraft.quantity) || 1) - 1),
+                            })
+                          }
+                          className="w-10 h-10 rounded-sm bg-[#DCD4BC] text-[#2B2620] text-lg font-bold"
+                        >
+                          −
+                        </button>
+                        <input
+                          type="number"
+                          inputMode="numeric"
+                          min={Math.max(1, editDraft.quantity_sold || 0)}
+                          value={editDraft.quantity ?? 1}
+                          onChange={(e) =>
+                            setEditDraft({
+                              ...editDraft,
+                              quantity: Math.max(Math.max(1, editDraft.quantity_sold || 0), Number(e.target.value) || 1),
+                            })
+                          }
+                          className="w-20 text-center bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setEditDraft({ ...editDraft, quantity: (Number(editDraft.quantity) || 1) + 1 })}
+                          className="w-10 h-10 rounded-sm bg-[#DCD4BC] text-[#2B2620] text-lg font-bold"
+                        >
+                          +
+                        </button>
+                      </div>
+                      <p className="text-xs text-[#8A7F63] mt-1">
+                        Wrong number of identical items? Fix it here. Setting it equal to what's already sold marks the whole entry as sold.
+                      </p>
                     </div>
 
                     <div>
