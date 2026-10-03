@@ -21,7 +21,7 @@ const ANALYSIS_PHOTO_QUALITY = 0.8;
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v17";
+const APP_VERSION = "v19";
 
 // ---------- storage helpers ----------
 
@@ -977,6 +977,67 @@ function DownloadablePhotos({ item, saveDirHandle, onChooseFolder, onRotate }) {
   const supportsFolderSave = typeof window !== "undefined" && "showDirectoryPicker" in window;
   const photos = item.photos || [];
 
+  // iPhone/iPad: no folder picker, and a zip lands in Files (not Photos) and
+  // needs unzipping. The Web Share API with files opens the native share
+  // sheet with ALL photos at once ("Save N Images" puts them in Photos in one
+  // tap). Safari only allows share() straight from a tap - an await on a
+  // network fetch first can lose that - so the photo files are fetched ahead
+  // of time here, and the button just calls share() with them ready.
+  const [shareFiles, setShareFiles] = useState(null);
+  // iPhone/iPad only (incl. iPadOS, which reports itself as a Mac) - Android
+  // and desktop keep exactly the behaviour they had before.
+  const isAppleTouch =
+    typeof navigator !== "undefined" &&
+    (/iPad|iPhone|iPod/.test(navigator.userAgent || "") ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1));
+  const supportsShareFiles =
+    isAppleTouch &&
+    typeof navigator.canShare === "function" &&
+    typeof File !== "undefined" &&
+    (() => {
+      try {
+        return navigator.canShare({ files: [new File(["x"], "a.jpg", { type: "image/jpeg" })] });
+      } catch {
+        return false;
+      }
+    })();
+  const photosKey = photos.join("|");
+  useEffect(() => {
+    if (supportsFolderSave || !supportsShareFiles || !photos.length) {
+      setShareFiles(null);
+      return;
+    }
+    let cancelled = false;
+    setShareFiles(null);
+    (async () => {
+      try {
+        const files = [];
+        for (let i = 0; i < photos.length; i++) {
+          const blob = await (await fetch(photos[i])).blob();
+          files.push(new File([blob], `${titleSlug}-${i + 1}.jpg`, { type: "image/jpeg" }));
+        }
+        if (!cancelled) setShareFiles(files);
+      } catch (err) {
+        console.error("Couldn't prepare photos for sharing:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [photosKey, supportsFolderSave, supportsShareFiles]);
+
+  const sharePhotos = async () => {
+    if (!shareFiles || !shareFiles.length) return;
+    try {
+      await navigator.share({ files: shareFiles });
+    } catch (err) {
+      if (err && err.name === "AbortError") return; // closed the share sheet
+      console.error("Share failed:", err);
+      alert("Couldn't open the share sheet: " + (err.message || err));
+    }
+  };
+
   const dataUrlToBlob = (dataUrl) => fetch(dataUrl).then((r) => r.blob());
 
   const saveToFolder = async () => {
@@ -1133,18 +1194,39 @@ function DownloadablePhotos({ item, saveDirHandle, onChooseFolder, onRotate }) {
             {busy ? "Saving…" : saved ? "Saved to folder" : `Save ${item.photos?.length || 0} photos to folder`}
           </button>
         )
+      ) : supportsShareFiles ? (
+        <>
+          <button
+            onClick={sharePhotos}
+            disabled={!shareFiles || !photos.length}
+            className="w-full mt-2 py-2.5 rounded bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+          >
+            {!shareFiles && photos.length ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+            {!shareFiles && photos.length ? "Getting photos ready…" : `Save all ${photos.length} photos`}
+          </button>
+          <p className="text-xs text-[#8A7F63] mt-1">
+            Opens the share sheet with every photo - tap "Save {photos.length} Images" to put them all in Photos at once.
+          </p>
+          <button
+            onClick={downloadZip}
+            disabled={busy || !photos.length}
+            className="mt-1 text-xs text-[#6B6250] underline disabled:opacity-50"
+          >
+            {busy ? "Building zip…" : "Or download as a .zip"}
+          </button>
+        </>
       ) : (
-        <button
-          onClick={downloadZip}
-          disabled={busy || !(item.photos || []).length}
-          className="w-full mt-2 py-2.5 rounded bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-medium flex items-center justify-center gap-2 disabled:opacity-50"
-        >
-          {busy ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
-          {busy ? "Building zip…" : `Download all ${item.photos?.length || 0} photos (.zip)`}
-        </button>
-      )}
-      {!supportsFolderSave && (
-        <p className="text-xs text-[#8A7F63] mt-1">This browser can't save straight to a folder — using a zip file instead.</p>
+        <>
+          <button
+            onClick={downloadZip}
+            disabled={busy || !(item.photos || []).length}
+            className="w-full mt-2 py-2.5 rounded bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+          >
+            {busy ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
+            {busy ? "Building zip…" : `Download all ${item.photos?.length || 0} photos (.zip)`}
+          </button>
+          <p className="text-xs text-[#8A7F63] mt-1">This browser can't save straight to a folder — using a zip file instead.</p>
+        </>
       )}
     </div>
   );
