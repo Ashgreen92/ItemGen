@@ -4,6 +4,7 @@ import { supabase } from "../lib/supabaseClient";
 
 const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra 1", "Extra 2", "Extra 3"];
 const PHOTO_BUCKET = "item-photos";
+const MAX_TOTAL_PHOTOS = 12; // capture allows 7; extra photos can be added later up to this
 
 // The AI never needs the full 1600px display copy to read a label or judge
 // a garment - a smaller version costs meaningfully fewer tokens per photo
@@ -21,7 +22,7 @@ const ANALYSIS_PHOTO_QUALITY = 0.8;
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v19";
+const APP_VERSION = "v21";
 
 // ---------- storage helpers ----------
 
@@ -967,13 +968,15 @@ function stockNumber(item) {
   return item?.id ? item.id.split("-")[0].toUpperCase() : "--------";
 }
 
-function DownloadablePhotos({ item, saveDirHandle, onChooseFolder, onRotate }) {
+function DownloadablePhotos({ item, saveDirHandle, onChooseFolder, onRotate, onAddPhotos }) {
   const sku = stockNumber(item);
   const titleSlug = (item.title || "item").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [heroIndex, setHeroIndex] = useState(0);
   const [rotating, setRotating] = useState(false);
+  const [addingPhotos, setAddingPhotos] = useState(false);
+  const addInputRef = useRef(null);
   const supportsFolderSave = typeof window !== "undefined" && "showDirectoryPicker" in window;
   const photos = item.photos || [];
 
@@ -1171,6 +1174,40 @@ function DownloadablePhotos({ item, saveDirHandle, onChooseFolder, onRotate }) {
             />
           ))}
         </div>
+      )}
+
+      {onAddPhotos && item.status !== "sold" && (
+        <>
+          <input
+            ref={addInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={async (ev) => {
+              const files = ev.target.files;
+              setAddingPhotos(true);
+              try {
+                await onAddPhotos(item, files);
+              } finally {
+                setAddingPhotos(false);
+                if (addInputRef.current) addInputRef.current.value = "";
+              }
+            }}
+          />
+          <button
+            onClick={() => addInputRef.current && addInputRef.current.click()}
+            disabled={addingPhotos || photos.length >= MAX_TOTAL_PHOTOS}
+            className="w-full mt-2 py-2.5 rounded bg-[#F7F3E8] border border-[#C9BFA3] text-[#2B2620] font-medium flex items-center justify-center gap-2 disabled:opacity-50"
+          >
+            {addingPhotos ? <Loader2 size={15} className="animate-spin" /> : <ImageIcon size={15} />}
+            {addingPhotos
+              ? "Adding photos…"
+              : photos.length >= MAX_TOTAL_PHOTOS
+              ? `Maximum ${MAX_TOTAL_PHOTOS} photos reached`
+              : "Add more photos"}
+          </button>
+        </>
       )}
 
       {supportsFolderSave ? (
@@ -1379,6 +1416,65 @@ export default function Home() {
     } catch (err) {
       console.error("Rotate failed:", err);
       alert("Couldn't rotate that photo: " + (err.message || err));
+    }
+  };
+
+  // Adds extra photos to an item that's already been uploaded (e.g. a label
+  // you forgot, a flaw close-up). Same pipeline as capture: full-size copy
+  // (1600px) at the next free index, plus a smaller AI-analysis copy when the
+  // item already keeps those in step with its photos. Doesn't re-run the AI -
+  // use "Regenerate" afterwards if you want the new photos read.
+  const addPhotos = async (item, files) => {
+    const list = Array.from(files || []);
+    if (!list.length) return;
+    const existing = item.photos || [];
+    const room = MAX_TOTAL_PHOTOS - existing.length;
+    if (room <= 0) {
+      alert(`This item already has the maximum of ${MAX_TOTAL_PHOTOS} photos.`);
+      return;
+    }
+    const toAdd = list.slice(0, room);
+    if (list.length > room) alert(`Only room for ${room} more - adding the first ${room}.`);
+    try {
+      const keepAnalysisInStep =
+        Array.isArray(item.analysis_photos) && item.analysis_photos.length === existing.length;
+      const newPhotos = [...existing];
+      const newAnalysis = keepAnalysisInStep ? [...item.analysis_photos] : null;
+      let firstNewDataUrl = null;
+      for (const file of toAdd) {
+        const index = newPhotos.length;
+        const full = await compressImage(file, 1600, 0.85);
+        if (!firstNewDataUrl) firstNewDataUrl = full;
+        const url = await uploadPhotoToStorage(full, `${item.id}/${index}.jpg`);
+        newPhotos.push(`${url}?t=${Date.now()}`);
+        if (newAnalysis) {
+          try {
+            const small = await resizeDataUrl(full, ANALYSIS_PHOTO_WIDTH, ANALYSIS_PHOTO_QUALITY);
+            const aUrl = await uploadPhotoToStorage(small, `${item.id}/${index}-analysis.jpg`);
+            newAnalysis.push(`${aUrl}?t=${Date.now()}`);
+          } catch (err) {
+            console.error("Analysis copy of added photo failed, using full-size:", err);
+            newAnalysis.push(newPhotos[index]);
+          }
+        }
+      }
+      const updates = { photos: newPhotos };
+      if (newAnalysis) updates.analysis_photos = newAnalysis;
+      // An item with no photos left (no thumbnail) gets one from the first new photo.
+      if (!existing.length && firstNewDataUrl) {
+        const smallThumb = await resizeDataUrl(firstNewDataUrl, 600, 0.65);
+        const thumbUrl = await uploadPhotoToStorage(smallThumb, `${item.id}/thumb.jpg`);
+        updates.thumbnail = `${thumbUrl}?t=${Date.now()}`;
+      }
+      const { error: updateError } = await supabase.from("items").update(updates).eq("id", item.id);
+      if (updateError) throw updateError;
+      delete itemDetailCache.current[item.id];
+      setSelectedItem((cur) => (cur && cur.id === item.id ? { ...cur, ...updates } : cur));
+      setEditDraft((d) => (d && d.id === item.id ? { ...d, ...updates } : d));
+      fetchItems();
+    } catch (err) {
+      console.error("Add photos failed:", err);
+      alert("Couldn't add those photos: " + (err.message || JSON.stringify(err)));
     }
   };
 
@@ -1624,7 +1720,42 @@ export default function Home() {
     }
   };
 
+  // Processing (the AI write-up) runs in THIS browser tab, not on the server -
+  // so if the tab is closed/refreshed or the phone locks mid-job, the item is
+  // left on "processing" and nothing ever finishes it. These track which jobs
+  // this tab is genuinely running right now, so the app can tell a live job
+  // from an orphaned one (see the "stuck" banner on Home), and keep the
+  // screen awake while a job is running so a phone doesn't lock and kill it.
+  const activeJobsRef = useRef(new Set());
+  const [activeJobCount, setActiveJobCount] = useState(0);
+  const [restartProgress, setRestartProgress] = useState(null);
+  const startJob = useCallback((id) => {
+    activeJobsRef.current.add(id);
+    setActiveJobCount(activeJobsRef.current.size);
+  }, []);
+  const endJob = useCallback((id) => {
+    activeJobsRef.current.delete(id);
+    setActiveJobCount(activeJobsRef.current.size);
+  }, []);
+  useEffect(() => {
+    if (activeJobCount === 0 || typeof navigator === "undefined" || !navigator.wakeLock) return;
+    let lock = null;
+    let cancelled = false;
+    navigator.wakeLock
+      .request("screen")
+      .then((l) => {
+        if (cancelled) l.release().catch(() => {});
+        else lock = l;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      if (lock) lock.release().catch(() => {});
+    };
+  }, [activeJobCount]);
+
   const runFullGeneration = useCallback(async (id, photos, confirmedFields, ebaySearchQuery) => {
+    startJob(id);
     try {
       const safePhotos = await ensureUnderSizeLimit(photos);
       const result = await analyzeItem(safePhotos, "full", confirmedFields || null, ebaySearchQuery || null);
@@ -1663,10 +1794,12 @@ export default function Home() {
       console.error(err);
       await supabase.from("items").update({ status: "error", error_detail: err.message || String(err) }).eq("id", id);
     }
+    endJob(id);
     fetchItems();
-  }, [fetchItems]);
+  }, [fetchItems, startJob, endJob]);
 
   const processItem = useCallback(async (id, photos) => {
+    startJob(id);
     try {
       const safePhotos = await ensureUnderSizeLimit(photos);
       const quick = await analyzeItem(safePhotos, "quick");
@@ -1692,8 +1825,43 @@ export default function Home() {
       console.error(err);
       await supabase.from("items").update({ status: "error", error_detail: err.message || String(err) }).eq("id", id);
       fetchItems();
+    } finally {
+      endJob(id);
     }
-  }, [fetchItems]);
+  }, [fetchItems, runFullGeneration, startJob, endJob]);
+
+  // Restarts items orphaned on "processing" one at a time (not all at once -
+  // running several full analyses simultaneously is what risks AI rate
+  // limits, and every failed run costs tokens again).
+  const restartStuckItems = async (ids) => {
+    if (!ids.length || restartProgress) return;
+    try {
+      const { data, error } = await supabase
+        .from("items")
+        .select("id, photos, analysis_photos, ebay_search_query")
+        .in("id", ids);
+      if (error) throw error;
+      const rows = data || [];
+      for (let i = 0; i < rows.length; i++) {
+        setRestartProgress({ done: i, total: rows.length });
+        const row = rows[i];
+        if (!row.photos || !row.photos.length) {
+          await supabase
+            .from("items")
+            .update({ status: "error", error_detail: "No photos stored for this item, so it can't be processed." })
+            .eq("id", row.id);
+          continue;
+        }
+        await processItem(row.id, pickAnalysisPhotos(row.analysis_photos, row.photos));
+      }
+    } catch (err) {
+      console.error("Restart stuck items failed:", err);
+      alert("Couldn't restart the stuck items: " + (err.message || JSON.stringify(err)));
+    } finally {
+      setRestartProgress(null);
+      fetchItems();
+    }
+  };
 
   const handleNextItem = async () => {
     if (currentPhotos.length === 0) return;
@@ -2432,6 +2600,47 @@ export default function Home() {
                       </span>
                       <span className="text-xs font-bold text-[#6B6250] shrink-0 ml-2">Back up now</span>
                     </button>
+                  );
+                })()}
+
+                {(() => {
+                  // "Processing" for 5+ minutes and not being run by this tab =
+                  // almost certainly orphaned (tab closed / phone locked).
+                  const stuckIds = items
+                    .filter(
+                      (e) =>
+                        e.status === "processing" &&
+                        !activeJobsRef.current.has(e.id) &&
+                        e.created_at &&
+                        Date.now() - new Date(e.created_at).getTime() > 5 * 60 * 1000
+                    )
+                    .map((e) => e.id);
+                  if (!stuckIds.length && !restartProgress) return null;
+                  return (
+                    <div className="mb-4 bg-[#A9822E]/10 border border-[#A9822E]/30 rounded-sm p-3">
+                      {restartProgress ? (
+                        <p className="text-sm text-[#2B2620] flex items-center gap-2">
+                          <Loader2 size={14} className="animate-spin" />
+                          Restarting stuck items - {restartProgress.done + 1} of {restartProgress.total}. Keep this open.
+                        </p>
+                      ) : (
+                        <>
+                          <p className="text-sm text-[#2B2620] mb-1">
+                            {stuckIds.length} item{stuckIds.length === 1 ? "" : "s"} stuck on "Processing"
+                          </p>
+                          <p className="text-xs text-[#6B6250] mb-2">
+                            The tab that started {stuckIds.length === 1 ? "it" : "them"} was closed or locked before finishing, so nothing will complete
+                            {stuckIds.length === 1 ? " it" : " them"} on its own. Restarting runs them one at a time and costs a normal analysis each.
+                          </p>
+                          <button
+                            onClick={() => restartStuckItems(stuckIds)}
+                            className="flex items-center gap-1.5 text-xs font-medium bg-[#A9822E]/20 text-[#7A5E1F] px-2.5 py-1.5 rounded-md"
+                          >
+                            <RefreshCw size={12} /> Restart {stuckIds.length === 1 ? "it" : "them"}
+                          </button>
+                        </>
+                      )}
+                    </div>
                   );
                 })()}
 
@@ -3587,7 +3796,7 @@ export default function Home() {
           </div>
 
           <div className="flex-1 overflow-y-auto p-4 sm:p-8 max-w-2xl w-full mx-auto">
-            <DownloadablePhotos item={selectedItem} saveDirHandle={saveDirHandle} onChooseFolder={chooseSaveFolder} onRotate={rotatePhoto} />
+            <DownloadablePhotos item={selectedItem} saveDirHandle={saveDirHandle} onChooseFolder={chooseSaveFolder} onRotate={rotatePhoto} onAddPhotos={addPhotos} />
 
             {selectedItem.status === "ready" && (
               <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-3 mb-5">
