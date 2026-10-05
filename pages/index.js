@@ -22,7 +22,7 @@ const ANALYSIS_PHOTO_QUALITY = 0.8;
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v21";
+const APP_VERSION = "v22";
 
 // ---------- storage helpers ----------
 
@@ -255,8 +255,8 @@ function pickAnalysisPhotos(analysisPhotos, photos) {
   return Array.isArray(analysisPhotos) && analysisPhotos.length === photos.length ? analysisPhotos : photos;
 }
 
-async function analyzeItem(photos, mode, confirmedFields, ebaySearchQuery) {
-  const bodyStr = JSON.stringify({ photos, mode, confirmedFields, ebaySearchQuery });
+async function analyzeItem(photos, mode, confirmedFields, ebaySearchQuery, itemId) {
+  const bodyStr = JSON.stringify({ photos, mode, confirmedFields, ebaySearchQuery, itemId });
   const res = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1758,7 +1758,7 @@ export default function Home() {
     startJob(id);
     try {
       const safePhotos = await ensureUnderSizeLimit(photos);
-      const result = await analyzeItem(safePhotos, "full", confirmedFields || null, ebaySearchQuery || null);
+      const result = await analyzeItem(safePhotos, "full", confirmedFields || null, ebaySearchQuery || null, id);
       const { error: updateError } = await supabase
         .from("items")
         .update({
@@ -1798,9 +1798,23 @@ export default function Home() {
     fetchItems();
   }, [fetchItems, startJob, endJob]);
 
-  const processItem = useCallback(async (id, photos) => {
+  const resumeFromItem = (item) => ({
+    sizeApplicable: item.size_applicable,
+    size: item.size,
+    searchQuery: item.ebay_search_query,
+  });
+
+  // `resume` (optional) = what an earlier attempt already worked out and saved
+  // on the item: { sizeApplicable, size, searchQuery }. When the quick pass
+  // already finished before a failure/stall, a retry skips straight to the
+  // full write-up instead of paying for the quick pass a second time.
+  const processItem = useCallback(async (id, photos, resume) => {
     startJob(id);
     try {
+      if (resume && resume.searchQuery && (resume.sizeApplicable === false || resume.size)) {
+        await runFullGeneration(id, photos, resume.sizeApplicable && resume.size ? { size: resume.size } : null, resume.searchQuery);
+        return;
+      }
       const safePhotos = await ensureUnderSizeLimit(photos);
       const quick = await analyzeItem(safePhotos, "quick");
       const sizeApplicable = quick.size_applicable === true;
@@ -1838,7 +1852,7 @@ export default function Home() {
     try {
       const { data, error } = await supabase
         .from("items")
-        .select("id, photos, analysis_photos, ebay_search_query")
+        .select("id, photos, analysis_photos, ebay_search_query, size_applicable, size")
         .in("id", ids);
       if (error) throw error;
       const rows = data || [];
@@ -1852,7 +1866,7 @@ export default function Home() {
             .eq("id", row.id);
           continue;
         }
-        await processItem(row.id, pickAnalysisPhotos(row.analysis_photos, row.photos));
+        await processItem(row.id, pickAnalysisPhotos(row.analysis_photos, row.photos), resumeFromItem(row));
       }
     } catch (err) {
       console.error("Restart stuck items failed:", err);
@@ -2022,7 +2036,7 @@ export default function Home() {
     await supabase.from("items").update({ status: "processing" }).eq("id", item.id);
     setSelectedItem({ ...item, status: "processing" });
     fetchItems();
-    processItem(item.id, pickAnalysisPhotos(item.analysis_photos, item.photos));
+    processItem(item.id, pickAnalysisPhotos(item.analysis_photos, item.photos), resumeFromItem(item));
   };
 
   const [sizeGateInput, setSizeGateInput] = useState("");
