@@ -1,3 +1,5 @@
+import { supabase } from "../../lib/supabaseClient";
+
 const QUICK_PROMPT = `Look at these photos of a single secondhand item. Answer ONLY with a JSON object, no markdown fences, no commentary:
 
 {
@@ -290,7 +292,7 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Server is missing ANTHROPIC_API_KEY" });
   }
 
-  const { photos, mode, confirmedFields, ebaySearchQuery, bundleItems, bundleCategory, bundleSizeLabel, bundlePricing } = req.body || {};
+  const { photos, mode, confirmedFields, ebaySearchQuery, bundleItems, bundleCategory, bundleSizeLabel, bundlePricing, itemId } = req.body || {};
 
   if (mode === "bundle") {
     if (!Array.isArray(bundleItems) || bundleItems.length < 2) {
@@ -433,15 +435,29 @@ export default async function handler(req, res) {
       body.tools = [{ type: "web_search_20250305", name: "web_search", max_uses: 2 }];
     }
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify(body),
-    });
+    // Rate-limited (429) / overloaded (529) / transient 5xx responses are
+    // rejected before any work is done, so they aren't billed - retrying them
+    // here (a couple of times, short waits) is free and saves the user from
+    // having to restart an item by hand. Anything else (400s etc.) is a real
+    // error and is returned straight away.
+    let response;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(body),
+      });
+      const retryable = response.status === 429 || response.status === 529 || response.status === 503 || response.status === 502;
+      if (response.ok || !retryable || attempt === 2) break;
+      const retryAfter = Number(response.headers.get("retry-after"));
+      const waitMs = Math.min(15000, (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 4 * (attempt + 1)) * 1000);
+      console.warn(`Anthropic ${response.status}, retrying in ${waitMs}ms (attempt ${attempt + 1})`);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
 
     if (!response.ok) {
       const detail = await response.text();
@@ -502,6 +518,48 @@ export default async function handler(req, res) {
       // ebay_comparable_scores was only needed for the price math above -
       // no reason to store the raw per-listing tiers on the item itself.
       delete result.ebay_comparable_scores;
+
+      // Save the finished write-up to the item right here, on the server, if
+      // the caller told us which item it's for. The analysis is paid for the
+      // moment it completes - if the browser tab that asked for it has been
+      // closed or the phone has locked by now, the result used to be thrown
+      // away and the item left on "processing", so restarting it paid for the
+      // same analysis twice. Saving here means it lands regardless. The
+      // client still saves it too (identical values), so this is purely a
+      // safety net - a failure here is logged, never fatal.
+      if (itemId) {
+        try {
+          const { error: saveError } = await supabase
+            .from("items")
+            .update({
+              title: result.title || "Untitled item",
+              vinted_title: result.vintedTitle || null,
+              description: result.description || "",
+              category: result.category || "",
+              condition: result.condition || "",
+              brand: result.brand || "",
+              price_low: result.estimated_price_low ?? null,
+              price_high: result.estimated_price_high ?? null,
+              recommended_price: result.recommended_price ?? null,
+              comparable_count: result.comparable_count ?? null,
+              price_confidence: result.price_confidence || null,
+              confidence: result.confidence || "medium",
+              notes: result.notes || "",
+              verify_before_listing: Array.isArray(result.verify_before_listing) ? result.verify_before_listing : [],
+              vinted_price_low: result.vinted_price_low ?? null,
+              vinted_price_high: result.vinted_price_high ?? null,
+              demand: result.demand || null,
+              listing_recommendation: result.listing_recommendation || null,
+              used_real_ebay_data: !!result._usedRealEbayData,
+              ebay_active_listings: result._ebayTotalListings ?? null,
+              status: "ready",
+            })
+            .eq("id", itemId);
+          if (saveError) console.error("Server-side save of analysis failed:", saveError);
+        } catch (saveErr) {
+          console.error("Server-side save of analysis threw:", saveErr);
+        }
+      }
     }
     return res.status(200).json(result);
   } catch (err) {
