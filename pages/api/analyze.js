@@ -50,9 +50,9 @@ Step 4: Respond with ONLY a JSON object as your final message, no markdown fence
 {
   "title": "the eBay-optimised title, under 80 characters, KEYWORD-DENSE since eBay search matches on title keywords. Only state details you actually observed per Step 1 (any seller-confirmed facts given in the user message may be included) — if you're not sure of the exact product line/model, use a generic accurate description instead (e.g. 'Men's Navy T-Shirt' not a specific product line you can't confirm). If Step 2's code search found a genuine match, use the real product name/brand from that listing here as observed fact. Order the keywords: Brand -> Gender -> Condition (only if New with tags or New without tags - use 'BNWT' for New with tags, 'New' for New without tags; omit this element entirely for any used condition, don't state 'Excellent'/'Good'/etc in the title) -> Colour -> Style/material keywords -> Garment type -> Notable feature -> Size — e.g. 'Nike Mens BNWT Black Fleece Zip Hoodie Jacket Large' or, if used, 'Nike Mens Black Fleece Zip Hoodie Jacket Large'. Only include an element in that order if it's actually known/observed; skip any you don't have rather than leaving a gap - New items are a strong selling point and something buyers specifically search for, so never drop it silently just because the title is getting long; drop a lower-priority element (Notable feature first) instead if space is tight. Include an RRP near the end of the title as 'RRP £X' whenever you have a genuinely sourced original price AND the item is New with tags/New without tags - either a price actually legible on a tag/label in the photos, OR a price found via a genuine code-search match in Step 2 (same standing as a tag price, never a Step 3 comp-search estimate) - but only ever if it still fits within the 80-character limit alongside everything else. Skip it entirely rather than guess, estimate, or truncate other important info to fit it in",
   "vintedTitle": "a SEPARATE, short, natural, clean Vinted-style title for the same item - NOT keyword-stuffed like the eBay title above. Vinted buyers browse and filter by brand/size/condition through Vinted's own structured filters, so cramming keywords into the title just reads as spammy there. Write it the way a normal seller would naturally title a Vinted listing, e.g. 'Nike black zip hoodie' or 'Vintage Levi's denim jacket' - a few natural words, same underlying facts as the eBay title (only what was actually observed per Step 1), but phrased conversationally rather than as a keyword list. If the item is New with tags or New without tags, work that in too the way a real Vinted seller naturally would (e.g. 'BNWT Nike black zip hoodie' or 'Converse black leather trainers, new without tags') - it's one of the first things a buyer looks for and Vinted sellers routinely lead or end a title with it, so don't leave it out just because the eBay title already states condition separately",
-  "description": "2-4 sentence listing description containing ONLY visually confirmed positive descriptive facts (plus any seller-confirmed facts given in the user message) - brand, style, colour, material, design details. Write it the way a person selling the item would write it - state facts plainly (e.g. 'Size 18½. Polyester-cotton blend.') Never narrate how you know something (no phrases like 'tag confirms', 'as shown in photos', 'visible in the images', 'label indicates', 'seller confirmed') - that reads as an AI wrote it, not a seller. NEVER state what ISN'T visible or wasn't included (no 'no label visible', 'no size tag shown', 'material unknown', etc.). DO NOT mention wear, flaws, stains, damage, fading, or any condition issues in the description at all, even if something looks visibly worn or damaged - the seller reviews every item in hand and adds any real flaws themselves; guessing at flaws from photos has repeatedly been wrong. Keep the description purely descriptive, not evaluative. Anything uncertain about the item's core identity still goes in verify_before_listing, just not condition commentary",
+  "description": "2-4 sentence listing description containing ONLY visually confirmed positive descriptive facts (plus any seller-confirmed facts given in the user message) - brand, style, colour, material, design details. Write it the way a person selling the item would write it - state facts plainly (e.g. 'Size 18½. Polyester-cotton blend.') Never narrate how you know something (no phrases like 'tag confirms', 'as shown in photos', 'visible in the images', 'label indicates', 'seller confirmed') - that reads as an AI wrote it, not a seller. NEVER state what ISN'T visible or wasn't included (no 'no label visible', 'no size tag shown', 'material unknown', etc.). DO NOT mention wear, flaws, stains, damage, fading, or any condition issues that YOU think you can see in the photos, even if something looks visibly worn or damaged - guessing at flaws from photos has repeatedly been wrong. The ONLY flaws that may appear are those the seller has reported in the user message under SELLER-REPORTED FLAWS: if that section is present, end the description with a plain, honest sentence or two stating exactly those flaws (e.g. 'Small stain on left sleeve.' - plain statement, never narrating the photos). Keep the seller's own facts and wording as close as possible - never soften, shorten, exaggerate, or add flaws they did not report. Otherwise keep the description purely descriptive, not evaluative Anything uncertain about the item's core identity still goes in verify_before_listing, just not condition commentary",
   "category": "the MOST SPECIFIC real resale subcategory available, not a broad umbrella term - e.g. 'Men's Zip-Up Hoodies' rather than just 'Men's Hoodies & Sweatshirts', 'Women's Skinny Jeans' rather than just 'Women's Jeans'. Being specific here matters for more than just discoverability - a vague category also skews comparable-pricing accuracy, since broader categories pull in a wider, less comparable spread of eBay listings when matching prices. Still only state a specific subcategory if the photos genuinely support it - fall back to the safest accurate broader label rather than guess a specific one you can't confirm. If the seller has already confirmed the category in the user message below, use that exact value. Otherwise be careful with garment TYPE specifically (top vs dress vs jumpsuit vs romper etc.) - only state a specific type if the photos clearly show the item's full length/silhouette. If you can't see enough of the garment to be sure whether it's cropped, full-length, one-piece, etc., use the safest/most generic accurate label and add a note to verify_before_listing rather than confidently asserting the wrong type",
-  "condition": "one of: New with tags, New without tags, Excellent, Good, Fair, Well worn. Judge condition on genuine wear/damage only - intentional design fading/distressing (stone-wash, acid-wash, factory-distressed denim, etc.) is not a flaw and shouldn't by itself lower the rating below Excellent/Good if the item is otherwise in good order. If the seller has confirmed condition in the user message below, use that.",
+  "condition": "one of: New with tags, New without tags, Excellent, Good, Fair, Well worn. Judge condition on genuine wear/damage only - intentional design fading/distressing (stone-wash, acid-wash, factory-distressed denim, etc.) is not a flaw and shouldn't by itself lower the rating below Excellent/Good if the item is otherwise in good order. If the seller has confirmed condition in the user message below, use that. If the user message includes SELLER-REPORTED FLAWS, the condition MUST be consistent with them - never New or Excellent alongside a reported stain, hole, tear, or similar flaw (use Good for minor marks, Fair for noticeable stains/small holes, Well worn for significant damage), unless the seller has confirmed a condition themselves.",
   "brand": "brand name if visible, else empty string. If the seller has confirmed brand in the user message below, use that.",
   "estimated_price_low": number (GBP, no symbol),
   "estimated_price_high": number (GBP, no symbol),
@@ -73,7 +73,7 @@ Never invent a price, material, or product line. Anything you didn't actually se
 // that actually vary call to call (seller-confirmed facts, real eBay data if
 // we have it). Everything else the model needs is in the cached system
 // prompt above.
-function buildFullUserPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings) {
+function buildFullUserPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings, flawNotes) {
   const cf = confirmedFields || {};
   const lines = [];
   if (cf.size) lines.push(`Size: ${cf.size}`);
@@ -92,8 +92,13 @@ function buildFullUserPrompt(confirmedFields, ebayListingsBlock, ebayTotalListin
     ? `Real current eBay UK active listings for this item, referenced as Step 3 in the system instructions:\n\n${ebayListingsBlock}${totalNote}`
     : "";
 
+  const flawsBlock = flawNotes
+    ? `SELLER-REPORTED FLAWS (written by the seller who has the item in hand - treat as verified fact and state them in the description as instructed; do not add others):\n${flawNotes}`
+    : "";
+
   const parts = ["Here are the photos of this item. Follow the system instructions and respond with the JSON object described there."];
   if (factsNote) parts.push(factsNote);
+  if (flawsBlock) parts.push(flawsBlock);
   if (ebayBlock) parts.push(ebayBlock);
   return parts.join("\n\n");
 }
@@ -383,10 +388,27 @@ export default async function handler(req, res) {
       ebayResults = marketData.results || [];
     }
 
+    // Seller-written flaw notes (stains, holes...) live on the item row, so
+    // reading them here means every route into a full write-up - first run,
+    // retry, restart, size prompt, Refresh with AI - picks them up without
+    // the client having to pass them each time. Any failure (including the
+    // flaw_notes column not existing yet) just means "no notes".
+    let flawNotes = "";
+    if (!isQuick && itemId) {
+      try {
+        const { data: noteRow, error: noteError } = await supabase.from("items").select("flaw_notes").eq("id", itemId).single();
+        if (!noteError && noteRow && typeof noteRow.flaw_notes === "string") {
+          flawNotes = noteRow.flaw_notes.trim().slice(0, 600);
+        }
+      } catch (noteErr) {
+        console.error("Reading flaw notes failed (continuing without):", noteErr);
+      }
+    }
+
     const hasEbayData = !!ebayListingsBlock;
     const promptText = isQuick
       ? QUICK_PROMPT
-      : buildFullUserPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings);
+      : buildFullUserPrompt(confirmedFields, ebayListingsBlock, ebayTotalListings, flawNotes);
 
     const body = {
       // Quick pass used to run on Haiku to keep it cheap, but that's what was
