@@ -22,7 +22,7 @@ const ANALYSIS_PHOTO_QUALITY = 0.8;
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v23";
+const APP_VERSION = "v24";
 
 // ---------- storage helpers ----------
 
@@ -3935,8 +3935,17 @@ export default function Home() {
             </button>
           </div>
 
-          <div ref={detailScrollRef} className="flex-1 overflow-y-auto p-4 sm:p-8 max-w-2xl w-full mx-auto">
+          {/* Phone/tablet: one narrow column, exactly as before. Wide screens
+              (lg+, 1024px and up): photos on the left and kept in view while
+              you scroll, details/pricing/copy fields/actions on the right. The
+              photo column is capped so the photo plus its thumbnails and
+              buttons always fit the window height. */}
+          <div ref={detailScrollRef} className="flex-1 overflow-y-auto p-4 sm:p-8 max-w-2xl lg:max-w-[1500px] w-full mx-auto">
+            <div className="lg:grid lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] lg:gap-8 lg:items-start">
+            <div className="lg:sticky lg:top-0 lg:max-w-[calc(100vh_-_300px)] lg:min-w-[320px]">
             <DownloadablePhotos item={selectedItem} saveDirHandle={saveDirHandle} onChooseFolder={chooseSaveFolder} onRotate={rotatePhoto} onAddPhotos={addPhotos} />
+            </div>
+            <div className="min-w-0">
 
             {selectedItem.status === "ready" && (
               <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-3 mb-5">
@@ -4562,6 +4571,8 @@ export default function Home() {
                 </button>
               </>
             )}
+            </div>
+            </div>
           </div>
         </div>
       )}
