@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, Check, RefreshCw, AlertCircle, Tag, Copy, Download, Settings as SettingsIcon, Menu, RotateCw, RotateCcw } from "lucide-react";
+import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, ChevronRight, Check, RefreshCw, AlertCircle, Tag, Copy, Download, Settings as SettingsIcon, Menu, RotateCw, RotateCcw } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
 const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra 1", "Extra 2", "Extra 3"];
@@ -22,7 +22,7 @@ const ANALYSIS_PHOTO_QUALITY = 0.8;
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v22";
+const APP_VERSION = "v23";
 
 // ---------- storage helpers ----------
 
@@ -1334,6 +1334,10 @@ export default function Home() {
   const [currentBatch, setCurrentBatch] = useState("");
   const [currentCostPrice, setCurrentCostPrice] = useState("");
   const [currentQuantity, setCurrentQuantity] = useState(1);
+  // Stains/holes/marks the seller types in at capture time; woven into the
+  // description by the AI. Deliberately NOT sticky like Box/Price paid -
+  // it clears after every item so one item's flaw never lands on the next.
+  const [currentFlawNotes, setCurrentFlawNotes] = useState("");
   const [currentItemType, setCurrentItemType] = useState("resale");
   const [batchFilter, setBatchFilter] = useState("all");
   const [moveTargetBox, setMoveTargetBox] = useState("");
@@ -1704,19 +1708,39 @@ export default function Home() {
   }, [view, unlocked, fetchItems, items]);
 
   const handleAddPhoto = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    // Copy the File objects out first - the input's own list is wiped below.
+    // The gallery picker allows several at once; the camera button still
+    // gives one per tap (a browser limitation).
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
     setCapturing(true);
+    let count = currentPhotos.length;
+    let dropped = 0;
     try {
-      const full = await compressImage(file, 1600, 0.85);
-      const result = await autoEnhance(full);
-      setCurrentPhotos((prev) => [...prev, result.url].slice(0, 7));
-      setEnhancedFlags((prev) => [...prev, result.enhanced].slice(0, 7));
-    } catch (err) {
-      console.error(err);
+      // One at a time (not in parallel): each photo is compressed and
+      // colour-corrected on a canvas, and several large photos at once can
+      // run a phone out of memory.
+      for (const file of files) {
+        if (count >= 7) {
+          dropped++;
+          continue;
+        }
+        try {
+          const full = await compressImage(file, 1600, 0.85);
+          const result = await autoEnhance(full);
+          setCurrentPhotos((prev) => [...prev, result.url].slice(0, 7));
+          setEnhancedFlags((prev) => [...prev, result.enhanced].slice(0, 7));
+          count++;
+        } catch (err) {
+          console.error(err);
+        }
+      }
     } finally {
       setCapturing(false);
       e.target.value = "";
+    }
+    if (dropped > 0) {
+      alert(`An item holds up to 7 photos - ${dropped} extra photo${dropped === 1 ? " was" : "s were"} not added.`);
     }
   };
 
@@ -1913,6 +1937,10 @@ export default function Home() {
         }
       }
 
+      // flaw_notes is only sent when something was typed, so items without
+      // a note keep saving even if the flaw_notes column hasn't been added
+      // to the database yet.
+      const flawNotes = currentFlawNotes.trim();
       const { data, error } = await supabase
         .from("items")
         .insert({
@@ -1927,6 +1955,7 @@ export default function Home() {
           quantity: currentQuantity || 1,
           quantity_sold: 0,
           item_type: currentItemType,
+          ...(flawNotes ? { flaw_notes: flawNotes } : {}),
         })
         .select()
         .single();
@@ -1935,6 +1964,7 @@ export default function Home() {
       setCurrentPhotos([]);
       setEnhancedFlags([]);
       setCurrentQuantity(1);
+      setCurrentFlawNotes("");
       fetchItems();
       processItem(data.id, pickAnalysisPhotos(analysisPhotoUrls, photoUrls));
     } catch (err) {
@@ -1943,10 +1973,17 @@ export default function Home() {
     }
   };
 
+  const [navIds, setNavIds] = useState([]);
+  const detailScrollRef = useRef(null);
   const itemDetailCache = useRef({});
   const CACHE_TTL_MS = 60000;
 
-  const openItem = async (item) => {
+  // `list` (optional) = the items on screen in the list this was opened from,
+  // in display order - snapshotted as ids so the previous/next buttons walk
+  // that list, and don't shift if the list re-sorts or refreshes meanwhile.
+  // `keepNav` = true when stepping between neighbours (keeps the same list).
+  const openItem = async (item, list, keepNav) => {
+    if (!keepNav) setNavIds(Array.isArray(list) ? list.map((i) => i.id) : []);
     setSelectedItem(item);
     setEditDraft(item);
     setEditing(false);
@@ -1986,9 +2023,13 @@ export default function Home() {
     const quantity = Math.max(1, quantitySold, Number(editDraft.quantity) || 1);
     const soldOut = quantitySold > 0 && quantity <= quantitySold;
     const status = soldOut ? "sold" : editDraft.status;
+    // Only send flaw_notes when it actually changed, so saving other edits
+    // still works before the flaw_notes column exists.
+    const flawChanged = (editDraft.flaw_notes || "").trim() !== (selectedItem?.flaw_notes || "").trim();
     const { error: saveError } = await supabase
       .from("items")
       .update({
+        ...(flawChanged ? { flaw_notes: (editDraft.flaw_notes || "").trim() || null } : {}),
         quantity,
         status,
         title: editDraft.title,
@@ -2022,11 +2063,22 @@ export default function Home() {
     if (editDraft.condition?.trim()) confirmedFields.condition = editDraft.condition.trim();
     if (editDraft.brand?.trim()) confirmedFields.brand = editDraft.brand.trim();
 
-    await supabase
+    // The server reads flaw_notes from the item row, so save any change first.
+    const flawChanged = (editDraft.flaw_notes || "").trim() !== (selectedItem?.flaw_notes || "").trim();
+    const { error: refreshPrepError } = await supabase
       .from("items")
-      .update({ category: editDraft.category, condition: editDraft.condition, status: "processing" })
+      .update({
+        category: editDraft.category,
+        condition: editDraft.condition,
+        status: "processing",
+        ...(flawChanged ? { flaw_notes: (editDraft.flaw_notes || "").trim() || null } : {}),
+      })
       .eq("id", editDraft.id);
-    setSelectedItem((s) => ({ ...s, status: "processing" }));
+    if (refreshPrepError) {
+      alert("Couldn't start the refresh: " + refreshPrepError.message);
+      return;
+    }
+    setSelectedItem((s) => ({ ...s, status: "processing", flaw_notes: (editDraft.flaw_notes || "").trim() || null }));
     setEditing(false);
     fetchItems();
     runFullGeneration(editDraft.id, pickAnalysisPhotos(editDraft.analysis_photos, editDraft.photos), Object.keys(confirmedFields).length ? confirmedFields : null, editDraft.ebay_search_query);
@@ -2056,6 +2108,39 @@ export default function Home() {
   const [costPriceInput, setCostPriceInput] = useState("");
   const [soldQtyInput, setSoldQtyInput] = useState("1");
   const [soldPlatformInput, setSoldPlatformInput] = useState("");
+
+  // Previous/next item. Skips anything deleted since the list was opened.
+  const navLiveIds = selectedItem ? navIds.filter((id) => id === selectedItem.id || items.some((i) => i.id === id)) : [];
+  const navIndex = selectedItem ? navLiveIds.indexOf(selectedItem.id) : -1;
+  const goToSibling = (delta) => {
+    if (navIndex < 0) return;
+    const targetId = navLiveIds[navIndex + delta];
+    const target = targetId ? items.find((i) => i.id === targetId) : null;
+    if (!target) return;
+    if (editing && !window.confirm("You have unsaved edits on this item. Move on and discard them?")) return;
+    setSoldFormFor(null);
+    openItem(target, null, true);
+  };
+
+  // Arrow keys on desktop. Ignored while typing, editing or in the sold form.
+  useEffect(() => {
+    if (!selectedItem) return;
+    const onKey = (ev) => {
+      if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+      const t = ev.target;
+      const tag = t && t.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (t && t.isContentEditable)) return;
+      if (editing || soldFormFor) return;
+      goToSibling(ev.key === "ArrowLeft" ? -1 : 1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  // New item opens scrolled to the top.
+  useEffect(() => {
+    if (detailScrollRef.current) detailScrollRef.current.scrollTop = 0;
+  }, [selectedItem?.id]);
 
   const [exporting, setExporting] = useState(false);
   const [exportingExcel, setExportingExcel] = useState(false);
@@ -2672,7 +2757,7 @@ export default function Home() {
                       {needsAttention.map((e) => (
                         <button
                           key={e.id}
-                          onClick={() => openItem(e)}
+                          onClick={() => openItem(e, needsAttention)}
                           className="flex items-center gap-3 bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm p-2.5 text-left"
                         >
                           <div className="w-10 h-10 rounded-sm overflow-hidden bg-[#DCD4BC] shrink-0">
@@ -3043,7 +3128,7 @@ export default function Home() {
                   {filtered.length === 0 ? (
                     <p className="text-sm text-[#8A7F63] py-8 text-center">Nothing here right now.</p>
                   ) : (
-                    filtered.map((e) => <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />)
+                    filtered.map((e) => <StockListRow key={e.id} item={e} onOpen={(it) => openItem(it, filtered)} onDelete={removeItem} />)
                   )}
                 </div>
               </>
@@ -3174,7 +3259,7 @@ export default function Home() {
                     ) : (
                       <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
                         {filtered.map((e) => (
-                          <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />
+                          <StockListRow key={e.id} item={e} onOpen={(it) => openItem(it, filtered)} onDelete={removeItem} />
                         ))}
                       </div>
                     )}
@@ -3220,7 +3305,7 @@ export default function Home() {
                                 key={e.id}
                                 onClick={(ev) => {
                                   ev.stopPropagation();
-                                  openItem(e);
+                                  openItem(e, group.items);
                                 }}
                                 className="text-sm text-left text-[#2B2620] underline decoration-[#C9BFA3] flex items-center gap-1.5"
                               >
@@ -3368,7 +3453,7 @@ export default function Home() {
                               key={e.id}
                               onClick={() => {
                                 setSelectedBundle(null);
-                                openItem(e);
+                                openItem(e, selectedBundle.items);
                               }}
                               className="flex items-center gap-2 text-left"
                             >
@@ -3460,7 +3545,7 @@ export default function Home() {
                 ) : (
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
                     {soldArchive.map((e) => (
-                      <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />
+                      <StockListRow key={e.id} item={e} onOpen={(it) => openItem(it, soldArchive)} onDelete={removeItem} />
                     ))}
                   </div>
                 )}
@@ -3643,15 +3728,33 @@ export default function Home() {
               }`}
             >
               <ImageIcon size={18} />
-              {currentPhotos.length >= 7 ? "Full" : "From gallery"}
+              {currentPhotos.length >= 7 ? "Full" : "From gallery (pick several)"}
               <input
                 type="file"
                 accept="image/*"
+                multiple
                 onChange={handleAddPhoto}
                 disabled={currentPhotos.length >= 7 || capturing}
                 style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
               />
             </div>
+          </div>
+
+          <div className="mb-3">
+            <label className="text-xs text-[#8A7F63] uppercase tracking-wide mb-1 block">
+              Flaws to mention — stains, holes, marks (optional)
+            </label>
+            <textarea
+              value={currentFlawNotes}
+              onChange={(e) => setCurrentFlawNotes(e.target.value)}
+              rows={2}
+              maxLength={500}
+              placeholder="e.g. Small bleach mark on left sleeve; tiny hole at hem"
+              className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm resize-none"
+            />
+            <p className="text-xs text-[#8A7F63] mt-1">
+              Added to the description in your words and taken into account for the condition. Clears after each item.
+            </p>
           </div>
 
           <button
@@ -3786,7 +3889,7 @@ export default function Home() {
                 ) : (
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
                     {filteredItems.map((e) => (
-                      <StockListRow key={e.id} item={e} onOpen={openItem} onDelete={removeItem} />
+                      <StockListRow key={e.id} item={e} onOpen={(it) => openItem(it, filteredItems)} onDelete={removeItem} />
                     ))}
                   </div>
                 )}
@@ -3803,13 +3906,36 @@ export default function Home() {
               <ChevronLeft size={18} />
               Back
             </button>
+            {navLiveIds.length > 1 && navIndex >= 0 && (
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => goToSibling(-1)}
+                  disabled={navIndex === 0}
+                  aria-label="Previous item"
+                  className="w-9 h-9 rounded-sm bg-[#DCD4BC] text-[#2B2620] flex items-center justify-center disabled:opacity-30"
+                >
+                  <ChevronLeft size={18} />
+                </button>
+                <span className="text-xs font-mono text-[#6B6250] w-14 text-center">
+                  {navIndex + 1} / {navLiveIds.length}
+                </span>
+                <button
+                  onClick={() => goToSibling(1)}
+                  disabled={navIndex >= navLiveIds.length - 1}
+                  aria-label="Next item"
+                  className="w-9 h-9 rounded-sm bg-[#DCD4BC] text-[#2B2620] flex items-center justify-center disabled:opacity-30"
+                >
+                  <ChevronRight size={18} />
+                </button>
+              </div>
+            )}
             <button onClick={() => removeItem(selectedItem.id)} className="text-[#A63A2E] flex items-center gap-1 text-sm">
               <Trash2 size={15} />
               Delete
             </button>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 sm:p-8 max-w-2xl w-full mx-auto">
+          <div ref={detailScrollRef} className="flex-1 overflow-y-auto p-4 sm:p-8 max-w-2xl w-full mx-auto">
             <DownloadablePhotos item={selectedItem} saveDirHandle={saveDirHandle} onChooseFolder={chooseSaveFolder} onRotate={rotatePhoto} onAddPhotos={addPhotos} />
 
             {selectedItem.status === "ready" && (
@@ -4368,6 +4494,21 @@ export default function Home() {
                         rows={4}
                         className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm resize-none"
                       />
+                    </div>
+
+                    <div>
+                      <label className="text-xs text-[#8A7F63] mb-1 block">Flaws to mention (stains, holes, marks)</label>
+                      <textarea
+                        value={editDraft.flaw_notes || ""}
+                        onChange={(e) => setEditDraft({ ...editDraft, flaw_notes: e.target.value })}
+                        rows={2}
+                        maxLength={500}
+                        placeholder="e.g. Small bleach mark on left sleeve"
+                        className="w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm px-3 py-2 text-sm resize-none"
+                      />
+                      <p className="text-xs text-[#8A7F63] mt-1">
+                        Only worked into the description when you use "Save & refresh with AI" below. "Save only" just stores the note.
+                      </p>
                     </div>
 
                     {editDraft.notes && (
