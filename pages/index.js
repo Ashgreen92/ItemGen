@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, ChevronRight, Check, RefreshCw, AlertCircle, Tag, Copy, Download, Settings as SettingsIcon, Menu, RotateCw, RotateCcw } from "lucide-react";
+import { Camera, Image as ImageIcon, X, Loader2, Trash2, Pencil, ChevronLeft, ChevronRight, Check, RefreshCw, AlertCircle, Tag, Copy, Download, Settings as SettingsIcon, Menu, RotateCw, RotateCcw, Home as HomeIcon, Package, ListChecks, Layers, CheckCircle2, BarChart3 } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
-const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra 1", "Extra 2", "Extra 3"];
+const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra 1", "Extra 2", "Extra 3", "Extra 4", "Extra 5", "Extra 6", "Extra 7", "Extra 8"];
+const MAX_CAPTURE_PHOTOS = SHOT_LABELS.length; // photo slots on the Upload screen
 const PHOTO_BUCKET = "item-photos";
-const MAX_TOTAL_PHOTOS = 12; // capture allows 7; extra photos can be added later up to this
+const MAX_TOTAL_PHOTOS = 16; // capture allows MAX_CAPTURE_PHOTOS (12); extra photos can be added later up to this
 
 // The AI never needs the full 1600px display copy to read a label or judge
 // a garment - a smaller version costs meaningfully fewer tokens per photo
@@ -22,7 +23,7 @@ const ANALYSIS_PHOTO_QUALITY = 0.8;
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v24";
+const APP_VERSION = "v27";
 
 // ---------- storage helpers ----------
 
@@ -1721,15 +1722,15 @@ export default function Home() {
       // colour-corrected on a canvas, and several large photos at once can
       // run a phone out of memory.
       for (const file of files) {
-        if (count >= 7) {
+        if (count >= MAX_CAPTURE_PHOTOS) {
           dropped++;
           continue;
         }
         try {
           const full = await compressImage(file, 1600, 0.85);
           const result = await autoEnhance(full);
-          setCurrentPhotos((prev) => [...prev, result.url].slice(0, 7));
-          setEnhancedFlags((prev) => [...prev, result.enhanced].slice(0, 7));
+          setCurrentPhotos((prev) => [...prev, result.url].slice(0, MAX_CAPTURE_PHOTOS));
+          setEnhancedFlags((prev) => [...prev, result.enhanced].slice(0, MAX_CAPTURE_PHOTOS));
           count++;
         } catch (err) {
           console.error(err);
@@ -1740,7 +1741,7 @@ export default function Home() {
       e.target.value = "";
     }
     if (dropped > 0) {
-      alert(`An item holds up to 7 photos - ${dropped} extra photo${dropped === 1 ? " was" : "s were"} not added.`);
+      alert(`An item holds up to ${MAX_CAPTURE_PHOTOS} photos - ${dropped} extra photo${dropped === 1 ? " was" : "s were"} not added.`);
     }
   };
 
@@ -2144,6 +2145,8 @@ export default function Home() {
 
   const [exporting, setExporting] = useState(false);
   const [exportingExcel, setExportingExcel] = useState(false);
+  const [cleaningStorage, setCleaningStorage] = useState(false);
+  const [storageCleanMsg, setStorageCleanMsg] = useState("");
 
   const recordBackup = async () => {
     const now = new Date().toISOString();
@@ -2487,9 +2490,159 @@ export default function Home() {
   };
 
   const removeItem = async (id) => {
-    await supabase.from("items").delete().eq("id", id);
+    const { error: deleteError } = await supabase.from("items").delete().eq("id", id);
+    if (deleteError) {
+      alert("Couldn't delete that item: " + deleteError.message);
+      return;
+    }
+    // Deleting only the database row used to leave every photo of the item
+    // behind in Storage, quietly using up the free-plan storage allowance.
+    // Best effort - a failure here never blocks the delete itself.
+    try {
+      const { data: files } = await supabase.storage.from(PHOTO_BUCKET).list(id, { limit: 1000 });
+      if (files && files.length) {
+        await supabase.storage.from(PHOTO_BUCKET).remove(files.map((f) => `${id}/${f.name}`));
+      }
+    } catch (err) {
+      console.error("Couldn't clear stored photos for deleted item", id, err);
+    }
     fetchItems();
     closeItem();
+  };
+
+  // Storage clean-up (Settings). Scans the photo bucket and removes only
+  // what nothing needs: (1) folders whose item no longer exists (left behind
+  // by deleted items / failed uploads - folders touched in the last hour are
+  // skipped so an upload in progress is never caught), (2) leftover photos of
+  // items already sold AND posted (only the tiny archive thumbnail is kept).
+  // Optionally (3) the smaller AI-only copies of active items. Files are
+  // removed through the Storage API (never SQL, which would orphan them).
+  const fmtBytes = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${(b / 1e6).toFixed(1)} MB`);
+  const runStorageCleanup = async () => {
+    if (cleaningStorage) return;
+    setCleaningStorage(true);
+    const bucket = supabase.storage.from(PHOTO_BUCKET);
+    try {
+      setStorageCleanMsg("Scanning storage…");
+      const { data: itemRows, error: itemErr } = await supabase.from("items").select("id, status, posted_at");
+      if (itemErr) throw itemErr;
+      const byId = new Map((itemRows || []).map((r) => [r.id, r]));
+
+      const folders = [];
+      for (let offset = 0; ; offset += 1000) {
+        const { data, error } = await bucket.list("", { limit: 1000, offset });
+        if (error) throw error;
+        (data || []).forEach((e) => {
+          if (!e.id) folders.push(e.name); // folders come back with a null id
+        });
+        if (!data || data.length < 1000) break;
+      }
+
+      const files = [];
+      const queue = [...folders];
+      let scanned = 0;
+      const worker = async () => {
+        while (queue.length) {
+          const folder = queue.shift();
+          const { data, error } = await bucket.list(folder, { limit: 1000 });
+          if (error) throw error;
+          (data || []).forEach((f) => {
+            if (!f.id) return;
+            files.push({
+              folder,
+              name: f.name,
+              path: `${folder}/${f.name}`,
+              size: Number(f.metadata && f.metadata.size) || 0,
+              at: new Date(f.updated_at || f.created_at || 0).getTime(),
+            });
+          });
+          scanned++;
+          if (scanned % 10 === 0) setStorageCleanMsg(`Scanning storage… ${scanned} of ${folders.length} folders`);
+        }
+      };
+      await Promise.all([worker(), worker(), worker(), worker()]);
+
+      const HOUR = 3600000;
+      const now = Date.now();
+      const orphan = [];
+      const leftover = [];
+      const analysis = [];
+      const rest = [];
+      let totalSize = 0;
+      files.forEach((f) => {
+        totalSize += f.size;
+        const row = byId.get(f.folder);
+        const recent = Number.isFinite(f.at) && now - f.at < HOUR;
+        if (!row) {
+          if (recent) rest.push(f);
+          else orphan.push(f);
+          return;
+        }
+        if (row.status === "sold" && row.posted_at && f.name !== "archive-thumb.jpg") {
+          leftover.push(f);
+          return;
+        }
+        if (row.status === "ready" && f.name.endsWith("-analysis.jpg")) {
+          analysis.push(f);
+          return;
+        }
+        rest.push(f);
+      });
+      const sum = (arr) => arr.reduce((t, f) => t + f.size, 0);
+      const removePaths = async (paths) => {
+        for (let i = 0; i < paths.length; i += 100) {
+          setStorageCleanMsg(`Deleting… ${Math.min(i + 100, paths.length)} of ${paths.length}`);
+          const { error } = await bucket.remove(paths.slice(i, i + 100));
+          if (error) throw error;
+        }
+      };
+
+      const report =
+        `Storage scan: ${files.length} files, ${fmtBytes(totalSize)} in total.\n\n` +
+        `• Left behind by deleted items or failed uploads: ${orphan.length} files, ${fmtBytes(sum(orphan))}\n` +
+        `• Leftover photos of items already sold and posted: ${leftover.length} files, ${fmtBytes(sum(leftover))}\n` +
+        `• Smaller AI copies of items you still have: ${analysis.length} files, ${fmtBytes(sum(analysis))}\n` +
+        `• Everything else (photos and thumbnails of items you still have): ${rest.length} files, ${fmtBytes(sum(rest))}`;
+
+      let freed = 0;
+      const safe = [...orphan, ...leftover];
+      if (safe.length) {
+        if (window.confirm(report + `\n\nDelete the first two groups now (${fmtBytes(sum(safe))})? Nothing you still need is in them.`)) {
+          await removePaths(safe.map((f) => f.path));
+          freed += sum(safe);
+        } else {
+          return;
+        }
+      } else if (!analysis.length) {
+        alert(report + "\n\nNothing safe to remove.");
+        return;
+      }
+
+      if (
+        analysis.length &&
+        window.confirm(
+          `Also delete the smaller AI copies (${fmtBytes(sum(analysis))})?\n\nThe app keeps working. The only difference: if you later use "refresh with AI" on one of those items, it sends the full-size photos instead, which costs a little more that one time.`
+        )
+      ) {
+        const ids = [...new Set(analysis.map((f) => f.folder))];
+        // Point the items at their full photos FIRST, then delete the files,
+        // so nothing ever references a copy that's already gone.
+        for (let i = 0; i < ids.length; i += 100) {
+          const { error } = await supabase.from("items").update({ analysis_photos: [] }).in("id", ids.slice(i, i + 100));
+          if (error) throw error;
+        }
+        await removePaths(analysis.map((f) => f.path));
+        freed += sum(analysis);
+      }
+      fetchItems();
+      alert(`Done. Removed about ${fmtBytes(freed)}. Supabase's usage figure updates within the hour and averages over the billing period, so it falls gradually.`);
+    } catch (err) {
+      console.error("Storage clean-up failed:", err);
+      alert("Storage clean-up stopped: " + (err.message || JSON.stringify(err)));
+    } finally {
+      setCleaningStorage(false);
+      setStorageCleanMsg("");
+    }
   };
 
   // Bulk-reassigns every item currently tagged with one box (batch) to a
@@ -2520,9 +2673,98 @@ export default function Home() {
   if (!unlocked) return <PasscodeGate onUnlock={() => setUnlocked(true)} />;
 
   return (
-    <div className="min-h-screen bg-[#EDE6D6] text-[#2B2620] flex flex-col relative">
+    <div className="min-h-screen bg-[#EDE6D6] text-[#2B2620] flex flex-col relative lg:pl-56">
       <BackgroundSunflower />
-      <div className="border-b-4 border-double border-[#8A7F63] px-4 sm:px-8 py-3 flex items-center justify-between sticky top-0 bg-[#EDE6D6]/95 backdrop-blur z-10">
+      {/* Desktop side menu (lg and up). Below that the top tab strip / phone
+          menu below is used instead, exactly as before. */}
+      <nav className="hidden lg:flex fixed left-0 top-0 bottom-0 w-56 z-10 flex-col gap-0.5 bg-[#E3D9C2] border-r border-[#C9BFA3] px-3 py-5 overflow-y-auto">
+        <div className="flex items-center gap-2.5 px-3 pb-3">
+          <div className="w-8 h-8 flex items-center justify-center shrink-0 text-[#A9822E]">
+            <SunflowerIcon size={28} />
+          </div>
+          <span className="font-serif text-xl tracking-tight">ItemGen</span>
+        </div>
+        {[
+          { group: "Work", entries: [
+            { key: "dashboard", label: "Home", Icon: HomeIcon },
+            { key: "capture", label: "Upload new", Icon: Camera },
+            { key: "stock", label: "Stock", Icon: Package, count: items.filter((e) => !(e.status === "sold" && e.posted_at)).length },
+            { key: "pipeline", label: "Item status", Icon: ListChecks },
+          ] },
+          { group: "Sell", entries: [
+            { key: "bundles", label: "Bundles", Icon: Layers },
+            { key: "sold", label: "Sold", Icon: CheckCircle2 },
+          ] },
+          { group: "Money", entries: [
+            { key: "finances", label: "Finances", Icon: BarChart3 },
+            { key: "bargains", label: "Bargains", Icon: Tag },
+          ] },
+        ].map((g) => (
+          <div key={g.group} className="flex flex-col gap-0.5">
+            <div className="px-3 pt-3 pb-1 text-[11px] font-mono uppercase tracking-widest text-[#6B6250]">{g.group}</div>
+            {g.entries.map((n) => (
+              <button
+                key={n.key}
+                onClick={() => setView(n.key)}
+                className={`flex items-center gap-2.5 px-3 py-2 rounded-sm text-sm font-bold text-left transition ${view === n.key ? "bg-[#A9822E] text-[#2B2620]" : "text-[#2B2620] hover:bg-[#D9CFB6]"}`}
+              >
+                <n.Icon size={16} className="shrink-0" />
+                <span className="flex-1">{n.label}</span>
+                {n.count > 0 && <span className="text-[11px] font-mono text-[#4A4436]">{n.count}</span>}
+              </button>
+            ))}
+          </div>
+        ))}
+        <div className="flex-1" />
+        <div className="relative">
+          {settingsOpen && (
+            <div className="absolute bottom-full left-0 mb-1 w-full bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm shadow-lg z-20 p-1">
+              <button
+                onClick={() => {
+                  setSettingsOpen(false);
+                  exportBackup();
+                }}
+                disabled={exporting}
+                className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#2B2620] hover:bg-[#DCD4BC] flex items-center gap-2 disabled:opacity-50"
+              >
+                {exporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                {exporting ? "Preparing backup…" : "Export full backup (JSON)"}
+              </button>
+              <button
+                onClick={() => {
+                  setSettingsOpen(false);
+                  exportBackupExcel();
+                }}
+                disabled={exportingExcel}
+                className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#2B2620] hover:bg-[#DCD4BC] flex items-center gap-2 disabled:opacity-50"
+              >
+                {exportingExcel ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                {exportingExcel ? "Preparing spreadsheet…" : "Export stock as Excel"}
+              </button>
+              <button
+                onClick={() => {
+                  setSettingsOpen(false);
+                  runStorageCleanup();
+                }}
+                disabled={cleaningStorage}
+                className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#2B2620] hover:bg-[#DCD4BC] flex items-center gap-2 disabled:opacity-50"
+              >
+                {cleaningStorage ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                {cleaningStorage ? "Cleaning up…" : "Free up photo storage"}
+              </button>
+            </div>
+          )}
+          <button
+            onClick={() => setSettingsOpen((s) => !s)}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-sm text-sm font-bold text-[#2B2620] hover:bg-[#D9CFB6] text-left"
+          >
+            <SettingsIcon size={16} className="shrink-0" />
+            Settings
+          </button>
+          <div className="px-3 pt-1 text-[11px] font-mono text-[#6B6250]">{APP_VERSION}</div>
+        </div>
+      </nav>
+      <div className="lg:hidden border-b-4 border-double border-[#8A7F63] px-4 sm:px-8 py-3 flex items-center justify-between sticky top-0 bg-[#EDE6D6]/95 backdrop-blur z-10">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 flex items-center justify-center shrink-0 text-[#A9822E]">
             <SunflowerIcon size={28} />
@@ -2614,6 +2856,17 @@ export default function Home() {
                 >
                   {exportingExcel ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
                   {exportingExcel ? "Preparing spreadsheet…" : "Export stock as Excel"}
+                </button>
+                <button
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    runStorageCleanup();
+                  }}
+                  disabled={cleaningStorage}
+                  className="w-full text-left px-3 py-2 rounded-sm text-sm text-[#2B2620] hover:bg-[#DCD4BC] flex items-center gap-2 disabled:opacity-50"
+                >
+                  {cleaningStorage ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                  {cleaningStorage ? "Cleaning up…" : "Free up photo storage"}
                 </button>
                 <div className="px-3 pt-2 pb-1 text-[10px] font-mono text-[#8A7F63] text-center border-t border-[#C9BFA3] mt-1">{APP_VERSION}</div>
               </div>
@@ -2806,9 +3059,19 @@ export default function Home() {
             // quantity has sold so far - not just fully-sold items. Personal
             // items are excluded entirely - tracked separately below instead.
             const revenue = resaleItems.reduce((s, e) => s + (Number(e.sale_price) || 0) * effectiveQuantitySold(e), 0);
-            // Cost is money actually spent - per-unit cost × total quantity
-            // ever captured for that item, summed across every item.
-            const cost = resaleItems.reduce((s, e) => s + (Number(e.cost_price) || 0) * (Number(e.quantity) || 1), 0);
+            // Cost of the items actually SOLD (per-unit cost × units sold) -
+            // the same basis as the monthly rows below, so Revenue - Cost =
+            // Profit here always matches the months added together. This used
+            // to count the cost of every item ever captured, including stock
+            // still unsold, which made Cost/Profit here disagree with the
+            // months. The unsold part is shown separately instead.
+            const cost = resaleItems.reduce((s, e) => s + (Number(e.cost_price) || 0) * effectiveQuantitySold(e), 0);
+            const unsoldStock = resaleItems.filter((e) => e.status !== "sold");
+            const unsoldCost = unsoldStock.reduce(
+              (s, e) => s + (Number(e.cost_price) || 0) * Math.max(0, (Number(e.quantity) || 1) - effectiveQuantitySold(e)),
+              0
+            );
+            const unsoldUnits = unsoldStock.reduce((s, e) => s + Math.max(0, (Number(e.quantity) || 1) - effectiveQuantitySold(e)), 0);
 
             // Personal items get their own simple tally - kept for your own
             // tracking, out of the resale revenue/cost/profit figures above.
@@ -2851,8 +3114,8 @@ export default function Home() {
 
                 <div className="grid grid-cols-3 gap-3 mb-3">
                   {[
-                    { label: "Revenue", value: fmtMoney(revenue, { signed: true }), positive: revenue > 0 },
-                    { label: "Cost", value: fmtMoney(-cost, { signed: true }), negative: cost > 0 },
+                    { label: "Sales (all time)", value: fmtMoney(revenue, { signed: true }), positive: revenue > 0 },
+                    { label: "Cost of items sold", value: fmtMoney(-cost, { signed: true }), negative: cost > 0 },
                     { label: "Profit", value: fmtMoney(revenue - cost, { signed: true }), highlight: true },
                   ].map((s) => (
                     <div
@@ -2883,11 +3146,19 @@ export default function Home() {
                   ))}
                 </div>
 
+                <div className="rounded-sm p-3 mb-6 border bg-[#F7F3E8] border-[#C9BFA3] flex items-center justify-between gap-3">
+                  <div>
+                    <span className="text-xs uppercase tracking-wide block mb-0.5 text-[#8A7F63]">Still in stock, not sold yet</span>
+                    <span className="text-xs text-[#8A7F63]">{unsoldUnits} item{unsoldUnits === 1 ? "" : "s"} · what you paid for them</span>
+                  </div>
+                  <span className="font-mono text-lg shrink-0">{fmtMoney(unsoldCost)}</span>
+                </div>
+
                 {monthTrends.length === 0 ? (
                   <p className="text-sm text-[#8A7F63] py-8 text-center">No sales yet to show trends for.</p>
                 ) : (
                   <div>
-                    <p className="text-xs font-semibold text-[#8A7F63] uppercase tracking-wide mb-2">Monthly trends</p>
+                    <p className="text-xs font-semibold text-[#8A7F63] uppercase tracking-wide mb-2">Monthly trends (sales, cost of items sold, profit)</p>
                     <div className="bg-[#F7F3E8] border border-[#C9BFA3] rounded-sm divide-y divide-[#C9BFA3]">
                       {monthTrends.map((m) => (
                         <div key={m.key} className="flex items-center justify-between px-3 py-2.5">
@@ -3663,12 +3934,15 @@ export default function Home() {
           </div>
 
           <p className="text-[#6B6250] text-sm mb-4">
-            For best results, try to capture: <span className="font-bold text-[#2B2620]">front · back · label or markings · close-up of any damage · one extra angle</span>. Press <span className="text-[#2B2620] font-medium">Next item</span> to submit these photos for AI identification and pricing.
+            For best results, try to capture: <span className="font-bold text-[#2B2620]">front · back · label or markings · close-up of any damage · one extra angle</span>. Up to {MAX_CAPTURE_PHOTOS} photos. Press <span className="text-[#2B2620] font-medium">Next item</span> to submit these photos for AI identification and pricing.
           </p>
 
-          <div className="grid grid-cols-4 gap-2 mb-1">
+          <div className="grid grid-cols-4 gap-2 mb-4">
             {SHOT_LABELS.map((label, i) => (
               <div key={i} className="aspect-square rounded-sm border border-[#C9BFA3] overflow-hidden flex items-center justify-center bg-[#F7F3E8] relative">
+                <span className="absolute top-0.5 left-1 z-10 text-[9px] font-mono font-bold text-[#6B6250] pointer-events-none">
+                  {i + 1}{i < 2 ? " req" : ""}
+                </span>
                 {currentPhotos[i] ? (
                   <>
                     <img src={currentPhotos[i]} alt="" className="w-full h-full object-cover" />
@@ -3696,45 +3970,38 @@ export default function Home() {
               </div>
             ))}
           </div>
-          <div className="grid grid-cols-4 gap-2 mb-4">
-            {SHOT_LABELS.map((label, i) => (
-              <span key={i} className="text-[9px] text-center text-[#8A7F63] uppercase tracking-wide">
-                {i + 1}{i < 2 ? " · req" : ""}
-              </span>
-            ))}
-          </div>
 
           <div className="grid grid-cols-2 gap-2 mb-3">
             <div
               className={`relative py-4 rounded bg-[#F7F3E8] border border-[#C9BFA3] flex items-center justify-center gap-2 font-medium text-[#2B2620] ${
-                currentPhotos.length >= 7 || capturing ? "opacity-40" : ""
+                currentPhotos.length >= MAX_CAPTURE_PHOTOS || capturing ? "opacity-40" : ""
               }`}
             >
               {capturing ? <Loader2 size={18} className="animate-spin" /> : <Camera size={18} />}
-              {currentPhotos.length >= 7 ? "Full" : "Take photo"}
+              {currentPhotos.length >= MAX_CAPTURE_PHOTOS ? "Full" : "Take photo"}
               <input
                 type="file"
                 accept="image/*"
                 capture="environment"
                 onChange={handleAddPhoto}
-                disabled={currentPhotos.length >= 7 || capturing}
+                disabled={currentPhotos.length >= MAX_CAPTURE_PHOTOS || capturing}
                 style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
               />
             </div>
 
             <div
               className={`relative py-4 rounded bg-[#F7F3E8] border border-[#C9BFA3] flex items-center justify-center gap-2 font-medium text-[#2B2620] ${
-                currentPhotos.length >= 7 || capturing ? "opacity-40" : ""
+                currentPhotos.length >= MAX_CAPTURE_PHOTOS || capturing ? "opacity-40" : ""
               }`}
             >
               <ImageIcon size={18} />
-              {currentPhotos.length >= 7 ? "Full" : "From gallery (pick several)"}
+              {currentPhotos.length >= MAX_CAPTURE_PHOTOS ? "Full" : "From gallery (pick several)"}
               <input
                 type="file"
                 accept="image/*"
                 multiple
                 onChange={handleAddPhoto}
-                disabled={currentPhotos.length >= 7 || capturing}
+                disabled={currentPhotos.length >= MAX_CAPTURE_PHOTOS || capturing}
                 style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
               />
             </div>
@@ -4574,6 +4841,12 @@ export default function Home() {
             </div>
             </div>
           </div>
+        </div>
+      )}
+      {storageCleanMsg && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-[#2B2620] text-white text-sm px-4 py-2 rounded-sm shadow-lg flex items-center gap-2">
+          <Loader2 size={14} className="animate-spin" />
+          {storageCleanMsg}
         </div>
       )}
     </div>
