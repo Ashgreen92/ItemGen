@@ -24,7 +24,7 @@ const ANALYSIS_PHOTO_QUALITY = 0.8;
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v29";
+const APP_VERSION = "v30";
 
 // ---------- storage helpers ----------
 
@@ -690,6 +690,50 @@ function resolveSizeToken(tok, skipDressChart) {
 // parseGender) matters too: kids' sizes are ages/heights, not dress sizes,
 // and aren't always spelled with the word "years" (e.g. a Girls' swimsuit
 // labelled just "8").
+// Kids' sizes come in many spellings of the same thing - "4-6 years",
+// "4/6 years", "4-6 years (104-116cm)", "4-6" - which used to each become their
+// own filter entry. This boils them down to one canonical label
+// ("Kids: 4-6 years", "Kids: 6-9 months"). Anything it isn't sure about (heights
+// only, odd words) is left exactly as it was, so nothing is ever mis-merged.
+function normalizeKidsSize(s) {
+  const t = s.replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim();
+  const range = t.match(/(\d{1,3})\s*(?:-|\/|to)\s*(\d{1,3})(?!\d)/);
+  const single = t.match(/(?<![\d.])(\d{1,3})(?![\d.])/);
+  const nums = range ? [Number(range[1]), Number(range[2])] : single ? [Number(single[1])] : null;
+  if (!nums) return `Kids: ${s}`;
+  // Whatever is left after taking out the numbers and the usual age words
+  // must be empty (or a letter size like "xl"), otherwise don't touch it.
+  const leftover = t
+    .replace(/\d+/g, "")
+    .replace(/\b(years?|yrs?|y|months?|mos?|mths?|m|age|aged|to|old|xs|s|l|xl|xxl)\b/g, "")
+    .replace(/[\s\-/.,]/g, "");
+  if (leftover) return `Kids: ${s}`;
+  const isMonths = /\b(months?|mos?|mths?)\b|\d\s*m\b/.test(t);
+  const max = isMonths ? 48 : 18;
+  if (nums.some((n) => n > max)) return `Kids: ${s}`;
+  const unit = isMonths ? "month" : "year";
+  const last = nums[nums.length - 1];
+  return `Kids: ${nums.join("-")} ${last === 1 ? unit : unit + "s"}`;
+}
+
+// Sort key for the size filter: adult sizes alphabetical first as before,
+// then kids' sizes in real order (months, then years, smallest first).
+function compareSizeOptions(a, b) {
+  const ka = a.startsWith("Kids: ");
+  const kb = b.startsWith("Kids: ");
+  if (ka !== kb) return ka ? 1 : -1;
+  if (!ka) return a < b ? -1 : a > b ? 1 : 0;
+  const parse = (x) => {
+    const m = x.match(/^Kids: (\d+)(?:-\d+)? (month|year)s?$/);
+    return m ? { u: m[2] === "month" ? 0 : 1, n: Number(m[1]) } : { u: 2, n: 0 };
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  if (pa.u !== pb.u) return pa.u - pb.u;
+  if (pa.n !== pb.n) return pa.n - pb.n;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 function normalizeSize(rawSize, garmentType, genderLabel) {
   if (!rawSize) return null;
   let s = rawSize.trim().toLowerCase();
@@ -703,7 +747,7 @@ function normalizeSize(rawSize, garmentType, genderLabel) {
   // Kids' sizing stays entirely separate from adult letter/numeric sizes -
   // never bucket these together with the adult chart above.
   if (isKidsCategory || /\byears?\b|\byrs?\b|\bage\b|\bmonths?\b|\bmos?\b|\binfant\b/.test(s)) {
-    return [`Kids: ${s}`];
+    return [normalizeKidsSize(s)];
   }
 
   // Strip a trailing fit descriptor off a bare number, e.g. "42 REG" -> "42".
@@ -3518,7 +3562,7 @@ export default function Home() {
             const garmentOptions = [...new Set(readyItems.map((e) => e._garment).filter(Boolean))].sort();
             // Size options are the normalized buckets, not raw labels - so
             // picking "M" catches "M", "12-14", and "12" all at once.
-            const sizeOptions = [...new Set(readyItems.flatMap((e) => e._sizeBuckets))].sort();
+            const sizeOptions = [...new Set(readyItems.flatMap((e) => e._sizeBuckets))].sort(compareSizeOptions);
 
             const filtered = readyItems.filter(
               (e) =>
