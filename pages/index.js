@@ -5,6 +5,7 @@ import { supabase } from "../lib/supabaseClient";
 const SHOT_LABELS = ["Front", "Back", "Label / model", "Condition detail", "Extra 1", "Extra 2", "Extra 3", "Extra 4", "Extra 5", "Extra 6", "Extra 7", "Extra 8"];
 const MAX_CAPTURE_PHOTOS = SHOT_LABELS.length; // photo slots on the Upload screen
 const PHOTO_BUCKET = "item-photos";
+const STORAGE_LIMIT_BYTES = 1e9; // Supabase Free plan allowance (Pro = 100 GB)
 const MAX_TOTAL_PHOTOS = 16; // capture allows MAX_CAPTURE_PHOTOS (12); extra photos can be added later up to this
 
 // The AI never needs the full 1600px display copy to read a label or judge
@@ -23,7 +24,7 @@ const ANALYSIS_PHOTO_QUALITY = 0.8;
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v28";
+const APP_VERSION = "v29";
 
 // ---------- storage helpers ----------
 
@@ -2166,6 +2167,10 @@ export default function Home() {
   const [exportingExcel, setExportingExcel] = useState(false);
   const [cleaningStorage, setCleaningStorage] = useState(false);
   const [storageCleanMsg, setStorageCleanMsg] = useState("");
+  // { bytes, files, at } from the latest storage scan (null until one has run)
+  const [storageUsed, setStorageUsed] = useState(null);
+  const [storageChecking, setStorageChecking] = useState(false);
+  const storageAutoCheckedRef = useRef(false);
 
   const recordBackup = async () => {
     const now = new Date().toISOString();
@@ -2533,12 +2538,20 @@ export default function Home() {
   // Optionally (3) the smaller AI-only copies of active items. Files are
   // removed through the Storage API (never SQL, which would orphan them).
   const fmtBytes = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${(b / 1e6).toFixed(1)} MB`);
-  const runStorageCleanup = async () => {
-    if (cleaningStorage) return;
-    setCleaningStorage(true);
+  // mode: "clean" (default, full clean-up flow), "check" (scan only, with the
+  // progress pill) or "silent" (scan only, no pill - used once on load).
+  const runStorageCleanup = async (mode = "clean") => {
+    if (cleaningStorage || storageChecking) return;
+    const cleanMode = mode === "clean";
+    const quiet = mode === "silent";
+    if (cleanMode) setCleaningStorage(true);
+    else setStorageChecking(true);
     const bucket = supabase.storage.from(PHOTO_BUCKET);
+    const say = (m) => {
+      if (!quiet) setStorageCleanMsg(m);
+    };
     try {
-      setStorageCleanMsg("Scanning storage…");
+      say("Scanning storage…");
       const { data: itemRows, error: itemErr } = await supabase.from("items").select("id, status, posted_at");
       if (itemErr) throw itemErr;
       const byId = new Map((itemRows || []).map((r) => [r.id, r]));
@@ -2572,7 +2585,7 @@ export default function Home() {
             });
           });
           scanned++;
-          if (scanned % 10 === 0) setStorageCleanMsg(`Scanning storage… ${scanned} of ${folders.length} folders`);
+          if (scanned % 10 === 0) say(`Scanning storage… ${scanned} of ${folders.length} folders`);
         }
       };
       await Promise.all([worker(), worker(), worker(), worker()]);
@@ -2604,6 +2617,8 @@ export default function Home() {
         rest.push(f);
       });
       const sum = (arr) => arr.reduce((t, f) => t + f.size, 0);
+      setStorageUsed({ bytes: totalSize, files: files.length, at: Date.now() });
+      if (!cleanMode) return;
       // Counts what Storage REALLY deleted - remove() can report success
       // while deleting nothing, so never trust it without checking.
       const removePaths = async (paths) => {
@@ -2657,15 +2672,58 @@ export default function Home() {
         freed += sum(analysis);
       }
       fetchItems();
+      setStorageUsed({ bytes: Math.max(0, totalSize - freed), files: files.length, at: Date.now() });
       alert(`Done. Removed about ${fmtBytes(freed)}. Supabase's usage figure updates within the hour and averages over the billing period, so it falls gradually.`);
     } catch (err) {
       console.error("Storage clean-up failed:", err);
-      alert("Storage clean-up stopped: " + (err.message || JSON.stringify(err)));
+      if (!quiet) alert("Storage scan/clean-up stopped: " + (err.message || JSON.stringify(err)));
     } finally {
       setCleaningStorage(false);
+      setStorageChecking(false);
       setStorageCleanMsg("");
     }
   };
+
+  // Check photo storage once per session, quietly, so the readout in the
+  // menu is filled in without anyone having to ask for it.
+  useEffect(() => {
+    if (!unlocked || storageAutoCheckedRef.current) return;
+    storageAutoCheckedRef.current = true;
+    runStorageCleanup("silent");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unlocked]);
+
+  // Small readout: bar + "0.63 GB of 1 GB". The 1 GB is the Supabase FREE
+  // plan allowance (Pro is 100 GB) - change STORAGE_LIMIT_BYTES if the plan changes.
+  const storageReadout = (
+    <div className="px-3 py-2">
+      <div className="flex items-center justify-between text-[11px] text-[#6B6250]">
+        <span>Photo storage</span>
+        <button
+          onClick={() => runStorageCleanup("check")}
+          disabled={cleaningStorage || storageChecking}
+          className="underline disabled:opacity-50"
+        >
+          {storageChecking ? "Checking…" : storageUsed ? "Recheck" : "Check"}
+        </button>
+      </div>
+      {storageUsed ? (
+        <>
+          <div className="mt-1 h-1.5 rounded-full bg-[#D9CFB6] overflow-hidden">
+            <div
+              className={`h-full ${storageUsed.bytes / STORAGE_LIMIT_BYTES >= 0.9 ? "bg-[#B3402A]" : storageUsed.bytes / STORAGE_LIMIT_BYTES >= 0.7 ? "bg-[#C9922E]" : "bg-[#5F7A4A]"}`}
+              style={{ width: `${Math.min(100, (storageUsed.bytes / STORAGE_LIMIT_BYTES) * 100)}%` }}
+            />
+          </div>
+          <div className="mt-1 text-xs font-mono text-[#2B2620]">
+            {fmtBytes(storageUsed.bytes)} of {fmtBytes(STORAGE_LIMIT_BYTES)} ({Math.round((storageUsed.bytes / STORAGE_LIMIT_BYTES) * 100)}%)
+          </div>
+        </>
+      ) : (
+        <div className="mt-1 text-xs text-[#6B6250]">{storageChecking ? "Scanning…" : "Not checked yet"}</div>
+      )}
+    </div>
+  );
 
   // Bulk-reassigns every item currently tagged with one box (batch) to a
   // different one in a single update - for "box was low so I decanted into
@@ -2776,6 +2834,7 @@ export default function Home() {
               </button>
             </div>
           )}
+          {storageReadout}
           <button
             onClick={() => setSettingsOpen((s) => !s)}
             className="w-full flex items-center gap-2.5 px-3 py-2 rounded-sm text-sm font-bold text-[#2B2620] hover:bg-[#D9CFB6] text-left"
@@ -2890,6 +2949,7 @@ export default function Home() {
                   {cleaningStorage ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
                   {cleaningStorage ? "Cleaning up…" : "Free up photo storage"}
                 </button>
+                <div className="border-t border-[#C9BFA3] mt-1">{storageReadout}</div>
                 <div className="px-3 pt-2 pb-1 text-[10px] font-mono text-[#8A7F63] text-center border-t border-[#C9BFA3] mt-1">{APP_VERSION}</div>
               </div>
             )}
