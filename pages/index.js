@@ -23,7 +23,7 @@ const ANALYSIS_PHOTO_QUALITY = 0.8;
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v27";
+const APP_VERSION = "v28";
 
 // ---------- storage helpers ----------
 
@@ -40,6 +40,25 @@ async function uploadPhotoToStorage(dataUrl, path) {
   if (error) throw error;
   const { data } = supabase.storage.from(PHOTO_BUCKET).getPublicUrl(path);
   return data.publicUrl;
+}
+
+// Deletes every file in one item's Storage folder and CHECKS it actually
+// worked. Supabase's remove() can report success while deleting nothing (e.g.
+// when a Storage permission blocks the delete), which is how photos of
+// posted items silently piled up. Throws with a clear message if any file
+// wasn't really deleted.
+async function removeItemFolder(id) {
+  const bucket = supabase.storage.from(PHOTO_BUCKET);
+  const { data: files, error: listError } = await bucket.list(id, { limit: 1000 });
+  if (listError) throw listError;
+  if (!files || !files.length) return;
+  const paths = files.map((f) => `${id}/${f.name}`);
+  const { data, error } = await bucket.remove(paths);
+  if (error) throw error;
+  const removed = (data || []).length;
+  if (removed < paths.length) {
+    throw new Error(`only ${removed} of ${paths.length} photo files were deleted - Storage may not be allowing deletes`);
+  }
 }
 
 // The AI pipeline and size-limit compression both need actual image data
@@ -2455,15 +2474,13 @@ export default function Home() {
       console.error("Failed to build archive thumbnail for", item.id, err);
     }
     try {
-      const { data: files } = await supabase.storage.from(PHOTO_BUCKET).list(item.id);
-      if (files && files.length) {
-        const paths = files.map((f) => `${item.id}/${f.name}`);
-        await supabase.storage.from(PHOTO_BUCKET).remove(paths);
-      }
+      await removeItemFolder(item.id);
     } catch (err) {
       console.error("Failed to clear stored photos for", item.id, err);
       // Don't block marking the item posted just because photo cleanup failed -
       // worst case a few stray files linger in Storage, not a lost sale record.
+      // But say so, instead of failing silently like it used to.
+      alert("Marked as posted, but its photos couldn't be deleted from storage (" + (err.message || err) + "). They still use space - Settings > Free up photo storage will retry.");
     }
     // Upload the shrunk thumbnail fresh, after the cleanup above, so it
     // doesn't get swept up in its own deletion - kept in Storage (not the DB
@@ -2499,12 +2516,10 @@ export default function Home() {
     // behind in Storage, quietly using up the free-plan storage allowance.
     // Best effort - a failure here never blocks the delete itself.
     try {
-      const { data: files } = await supabase.storage.from(PHOTO_BUCKET).list(id, { limit: 1000 });
-      if (files && files.length) {
-        await supabase.storage.from(PHOTO_BUCKET).remove(files.map((f) => `${id}/${f.name}`));
-      }
+      await removeItemFolder(id);
     } catch (err) {
       console.error("Couldn't clear stored photos for deleted item", id, err);
+      alert("Item deleted, but its photos couldn't be deleted from storage (" + (err.message || err) + "). Settings > Free up photo storage will retry.");
     }
     fetchItems();
     closeItem();
@@ -2589,11 +2604,18 @@ export default function Home() {
         rest.push(f);
       });
       const sum = (arr) => arr.reduce((t, f) => t + f.size, 0);
+      // Counts what Storage REALLY deleted - remove() can report success
+      // while deleting nothing, so never trust it without checking.
       const removePaths = async (paths) => {
+        let removed = 0;
         for (let i = 0; i < paths.length; i += 100) {
           setStorageCleanMsg(`Deleting… ${Math.min(i + 100, paths.length)} of ${paths.length}`);
-          const { error } = await bucket.remove(paths.slice(i, i + 100));
+          const { data, error } = await bucket.remove(paths.slice(i, i + 100));
           if (error) throw error;
+          removed += (data || []).length;
+        }
+        if (removed < paths.length) {
+          throw new Error(`Only ${removed} of ${paths.length} files were really deleted. Storage may not be allowing deletes.`);
         }
       };
 
