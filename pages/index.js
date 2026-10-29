@@ -24,7 +24,7 @@ const ANALYSIS_PHOTO_QUALITY = 0.8;
 // the new number when sending updated files - lets you glance at Settings
 // and know exactly what's actually deployed versus what's been sent but not
 // copied over yet, instead of having to guess or ask.
-const APP_VERSION = "v30";
+const APP_VERSION = "v31";
 
 // ---------- storage helpers ----------
 
@@ -738,6 +738,8 @@ function normalizeSize(rawSize, garmentType, genderLabel) {
   if (!rawSize) return null;
   let s = rawSize.trim().toLowerCase();
   s = s.replace(GENDER_WORD, " ").replace(/\s+/g, " ").trim();
+  // "UK 10-12 (EU 38)" - drop the bracketed EU note so it buckets on the UK range.
+  if (/^uk\s*\d/.test(s)) s = s.replace(/\s*\([^)]*\)/g, "").trim();
 
   const isKidsCategory = genderLabel === "Boys'" || genderLabel === "Girls'" || genderLabel === "Kids'";
   const isWaistSized = garmentType && /trouser|jean|pant|legging|short|chino|dungaree|overall/i.test(garmentType);
