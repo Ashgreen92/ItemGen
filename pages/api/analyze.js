@@ -4,7 +4,8 @@ const QUICK_PROMPT = `Look at these photos of a single secondhand item. Answer O
 
 {
   "size_applicable": true or false. True only if this is clothing or footwear where a size is a normal, expected listing detail. False for anything else (electronics, homeware, toys, accessories, etc.),
-  "size": "the exact size if you can read it on a visible label/tag in the photos, else null. Only fill this in if actually legible - never guess.",
+  "size": "the exact size if you can read it on a visible label/tag in the photos, else null. Only fill this in if actually legible - never guess. UK size always takes priority: if the label shows a UK size, use that. If the label shows NO UK size but does show an EU / continental size (e.g. 'EU 38', 'EUR 38', or a bare number printed beside other European sizes such as FR/IT/DE), return that EU size written with an 'EU' prefix, e.g. 'EU 38' - never convert it into a UK size yourself, and never leave it null just because there is no UK size.",
+  "size_kind": "'womens_clothing' if this is women's clothing sized in dress sizes (tops, dresses, skirts, knitwear, coats, and trousers/jeans with a plain number size), otherwise 'other' (shoes, men's, kids', accessories, bras, waist/inch sizes like W30)",
   "search_query": "a short, accurate eBay search phrase for this item - brand + item type + any distinguishing detail visible (e.g. 'Nike Air Max 90 trainers mens', 'Emporio Armani navy t-shirt'). No fluff, no size/condition words, just what a buyer would type to find this item."
 }`;
 
@@ -285,6 +286,20 @@ async function getEbayMarketData(query) {
   }
 }
 
+// EU -> UK for WOMEN'S CLOTHING ONLY, given as a range because published
+// charts disagree by two UK sizes: Foot Locker UK has EU 38 = UK 10, while
+// size-charts.com has EU 38 = UK 12. So UK = EU-28 (low end) to EU-26 (high
+// end), e.g. EU 38 -> "UK 10-12 (EU 38)". Only even EU sizes 32-52, where
+// both charts exist; anything else is left as the plain EU size. Shoes, men's
+// and kids' sizes are never converted here (no reliable mapping).
+function euWomensToUkRange(sizeStr) {
+  const m = /^EU\s*(\d{2})$/i.exec(String(sizeStr || "").trim());
+  if (!m) return null;
+  const eu = Number(m[1]);
+  if (eu < 32 || eu > 52 || eu % 2 !== 0) return null;
+  return `UK ${eu - 28}-${eu - 26} (EU ${eu})`;
+}
+
 // ---------- handler ----------
 
 export default async function handler(req, res) {
@@ -515,6 +530,11 @@ export default async function handler(req, res) {
     } catch (parseErr) {
       console.error("JSON extraction failed. Raw text:", text);
       return res.status(502).json({ error: parseErr.message });
+    }
+    if (isQuick) {
+      const ukRange = result.size_kind === "womens_clothing" ? euWomensToUkRange(result.size) : null;
+      if (ukRange) result.size = ukRange;
+      delete result.size_kind;
     }
     if (!isQuick) {
       result._usedRealEbayData = !!ebayListingsBlock;
